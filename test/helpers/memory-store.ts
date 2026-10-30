@@ -5,7 +5,10 @@ interface StoredIdentity extends NewIdentity { userId: string }
 interface StoredSession { userId: string; expiresAt: Date; identity: { provider: string; subject: string } }
 interface StoredUser extends AuthUser { suspended: boolean }
 
-export type MemoryStore = AuthStore<null> & {
+/** A distinct handle per transaction, so tests can tell whether two calls shared one. */
+export interface MemoryTx { readonly id: number }
+
+export type MemoryStore = AuthStore<MemoryTx> & {
   suspend(userId: string): void;
   sessions: Map<string, StoredSession>;
 };
@@ -15,6 +18,7 @@ export function createMemoryStore(): MemoryStore {
   let identities: StoredIdentity[] = [];
   let sessions = new Map<string, StoredSession>();
   let seq = 0;
+  let txSeq = 0;
 
   const publicUser = (u: StoredUser): AuthUser => ({ id: u.id, email: u.email, name: u.name });
   const isSuspended = (userId: string) => users.get(userId)?.suspended === true;
@@ -33,7 +37,7 @@ export function createMemoryStore(): MemoryStore {
         seq,
       };
       try {
-        return await fn(null);
+        return await fn({ id: ++txSeq });
       } catch (err) {
         users = snap.users;
         identities = snap.identities;

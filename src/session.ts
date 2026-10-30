@@ -32,7 +32,7 @@ export interface SessionsConfig {
 export function makeSessions(cfg: SessionsConfig) {
   const opts = (maxAgeSec: number): CookieOptions => ({
     maxAgeSec,
-    secure: cfg.publicUrl.startsWith('https'),
+    secure: new URL(cfg.publicUrl).protocol === 'https:',
     ...(cfg.cookieDomain ? { domain: cfg.cookieDomain } : {}),
   });
 

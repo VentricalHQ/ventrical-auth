@@ -1,19 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import { openOAuthState } from '../src/cookies.js';
-import { hashToken } from '../src/crypto.js';
 import { createAuth, type AuthConfig } from '../src/index.js';
 import { newSessionId } from '../src/session.js';
 import { fakeProvider } from './helpers/fake-provider.js';
-import { createMemoryStore } from './helpers/memory-store.js';
+import { createMemoryStore, type MemoryTx } from './helpers/memory-store.js';
 import { cookieHeaderFrom, req, setCookie } from './helpers/request.js';
 
 const KEY = Buffer.alloc(32, 7);
 const FRONT = 'https://app.example.test';
 const profile = { subject: 's', emailVerified: true };
 
-function setup(over: Partial<AuthConfig<null>> = {}) {
+function setup(over: Partial<AuthConfig<MemoryTx>> = {}) {
   const store = createMemoryStore();
-  const auth = createAuth<null>({
+  const auth = createAuth<MemoryTx>({
     providers: { google: { clientId: 'fake-id', clientSecret: 'fake-secret' } },
     publicUrl: 'https://api.example.test',
     frontendUrl: FRONT,
@@ -182,18 +181,18 @@ describe('POST /auth/logout-everywhere', () => {
     expect((await res.json() as any).error.code).toBe('unauthenticated');
   });
 
-  it('calls onLogoutEverywhere in the same transaction as the delete, then clears the cookie', async () => {
+  it('calls onLogoutEverywhere with the same tx as the delete, in one transaction, then clears the cookie', async () => {
     const store = createMemoryStore();
-    const seen: unknown[] = [];
-    const txs: unknown[] = [];
-    let inTx = 0;
+    const calls: string[] = [];
+    let hookTx: MemoryTx | undefined;
+    let deleteTx: MemoryTx | undefined;
     const wrapped = Object.assign(Object.create(store) as typeof store, {
-      transaction: <T>(fn: (tx: null) => Promise<T>) => { inTx++; return store.transaction(fn).finally(() => { inTx--; }); },
-      deleteSessionsForUser: (uid: string, tx?: null) => { txs.push(inTx); return store.deleteSessionsForUser(uid, tx); },
+      transaction: <T>(fn: (tx: MemoryTx) => Promise<T>) => { calls.push('transaction'); return store.transaction(fn); },
+      deleteSessionsForUser: (uid: string, tx?: MemoryTx) => { calls.push('delete'); deleteTx = tx; return store.deleteSessionsForUser(uid, tx); },
     });
     const { auth } = setup({
       store: wrapped,
-      hooks: { onLogoutEverywhere: async (uid) => { seen.push([uid, inTx]); } },
+      hooks: { onLogoutEverywhere: async (_uid, tx) => { calls.push('hook'); hookTx = tx; } },
     });
     const s = await withSession(store);
     const other = await withSession(store, 'b@example.test');
@@ -201,12 +200,20 @@ describe('POST /auth/logout-everywhere', () => {
     await store.transaction((tx) => store.createSessionUnlessSuspended(s.user.id, second.idHash, new Date(Date.now() + 864e5), { provider: 'github', subject: 'x' }, tx));
     const res = (await auth.handle(req('POST', '/auth/logout-everywhere', { cookie: s.cookie, origin: FRONT })))!;
     expect(res.status).toBe(204);
-    expect(seen).toEqual([[s.user.id, 1]]);
-    expect(txs).toEqual([1]);
+    expect(calls).toEqual(['transaction', 'hook', 'delete']);
+    expect(hookTx).toBeDefined();
+    expect(deleteTx).toBe(hookTx);
     expect(store.sessions.has(s.idHash)).toBe(false);
     expect(store.sessions.has(second.idHash)).toBe(false);
     expect(store.sessions.has(other.idHash)).toBe(true);
     expect(setCookie(res, 'ventrical_session')!.value).toBe('');
+  });
+
+  it('the memory store hands out a distinct tx per transaction', async () => {
+    const store = createMemoryStore();
+    const a = await store.transaction(async (tx) => tx);
+    const b = await store.transaction(async (tx) => tx);
+    expect(a).not.toBe(b);
   });
 
   it('a hook failure leaves the sessions in place and returns a generic 500', async () => {
@@ -220,16 +227,30 @@ describe('POST /auth/logout-everywhere', () => {
     expect(res.headers.getSetCookie()).toEqual([]);
   });
 
-  it('a delete failure after the hook rolls back and leaves sessions', async () => {
+  it('a delete failure rolls back the hook\'s writes and keeps every session', async () => {
     const store = createMemoryStore();
     const failing = Object.assign(Object.create(store) as typeof store, {
       deleteSessionsForUser: async () => { throw new Error('boom'); },
     });
-    const { auth } = setup({ store: failing });
+    const planted = newSessionId();
+    const { auth } = setup({
+      store: failing,
+      hooks: {
+        onLogoutEverywhere: async (uid, tx) => {
+          // The hook's write goes through the tx; the failed delete must undo it.
+          await store.createSessionUnlessSuspended(uid, planted.idHash, new Date(Date.now() + 864e5), { provider: 'github', subject: 'hook' }, tx);
+          expect(store.sessions.has(planted.idHash)).toBe(true);
+        },
+      },
+    });
     const s = await withSession(store);
+    const other = await withSession(store, 'b@example.test');
     const res = (await auth.handle(req('POST', '/auth/logout-everywhere', { cookie: s.cookie, origin: FRONT })))!;
     expect(res.status).toBe(500);
+    expect(store.sessions.has(planted.idHash)).toBe(false);
     expect(store.sessions.has(s.idHash)).toBe(true);
+    expect(store.sessions.has(other.idHash)).toBe(true);
+    expect(res.headers.getSetCookie()).toEqual([]);
   });
 });
 
@@ -256,7 +277,7 @@ describe('createAuth surface', () => {
     await expect(auth.requireSession(req('GET', '/'))).rejects.toMatchObject({ status: 401 });
   });
   it('a refreshed session cookie is forwarded on /start', async () => {
-    let now = new Date('2026-01-01T00:00:00Z');
+    const now = new Date('2026-01-01T00:00:00Z');
     const store = createMemoryStore();
     const { auth } = setup({ store, clock: () => now });
     const user = await store.createUserWithIdentity({ provider: 'github', subject: 'q', emailVerified: true });
@@ -265,7 +286,58 @@ describe('createAuth surface', () => {
     const res = (await auth.handle(req('GET', '/auth/google/start', { cookie: `ventrical_session=${id}` })))!;
     expect(setCookie(res, 'ventrical_session')!.value).toBe(id);
     expect(cookieHeaderFrom(res)).toContain('ventrical_oauth=');
-    expect(hashToken(id)).toBe(idHash);
-    now = new Date(now.getTime());
+  });
+});
+
+describe('origin check runs before everything else', () => {
+  const paths = ['/auth/logout', '/auth/logout-everywhere'];
+  const bad = [{}, { origin: 'https://evil.test' }, { referer: 'https://evil.test/x' }];
+
+  it.each(paths)('%s: an unauthenticated request with a bad Origin is 403, not 401', async (path) => {
+    const { auth } = setup();
+    for (const o of bad) {
+      const res = (await auth.handle(req('POST', path, o)))!;
+      expect(res.status).toBe(403);
+      expect((await res.json() as any).error.code).toBe('forbidden');
+    }
+  });
+
+  it.each(paths)('%s: a 403 makes zero store and hook calls', async (path) => {
+    const store = createMemoryStore();
+    const s = await withSession(store);
+    const calls: string[] = [];
+    const spy = <K extends keyof typeof store>(k: K) => (...a: unknown[]) => { calls.push(String(k)); return (store[k] as (...x: unknown[]) => unknown)(...a); };
+    const wrapped = Object.assign(Object.create(store) as typeof store, {
+      getSessionWithExpiry: spy('getSessionWithExpiry'), touchSession: spy('touchSession'), deleteSession: spy('deleteSession'),
+      deleteSessionsForUser: spy('deleteSessionsForUser'), transaction: spy('transaction'),
+      isSuspendedCredential: spy('isSuspendedCredential'),
+    });
+    const { auth } = setup({ store: wrapped, hooks: { onLogoutEverywhere: async () => { calls.push('hook'); } } });
+    for (const o of bad) {
+      expect((await auth.handle(req('POST', path, { cookie: s.cookie, ...o })))!.status).toBe(403);
+    }
+    expect(calls).toEqual([]);
+  });
+});
+
+describe('path and scheme handling', () => {
+  it('a malformed percent-escape in the provider segment is 404 not_found', async () => {
+    const res = (await setup().auth.handle(req('GET', '/auth/%E0%A4%A/start')))!;
+    expect(res.status).toBe(404);
+    expect((await res.json() as any).error.code).toBe('not_found');
+  });
+
+  it('an upper-case HTTPS:// publicUrl still yields Secure cookies', async () => {
+    const { auth } = setup({ publicUrl: 'HTTPS://api.example.test' });
+    const res = (await auth.handle(req('GET', '/auth/google/start')))!;
+    expect(setCookie(res, 'ventrical_oauth')!.attrs.secure).toBe(true);
+    const out = (await auth.handle(req('POST', '/auth/logout', { origin: FRONT })))!;
+    expect(setCookie(out, 'ventrical_session')!.attrs.secure).toBe(true);
+  });
+
+  it('an http publicUrl yields no Secure attribute', async () => {
+    const { auth } = setup({ publicUrl: 'http://localhost:3000' });
+    const res = (await auth.handle(req('GET', '/auth/google/start')))!;
+    expect(setCookie(res, 'ventrical_oauth')!.attrs.secure).toBeUndefined();
   });
 });

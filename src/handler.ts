@@ -31,6 +31,15 @@ function errorResponse(err: unknown): Response {
   return json(500, { error: { code: 'internal_error', message: 'Internal error' } });
 }
 
+/** A malformed percent-escape cannot name a provider; it falls through to not_found. */
+function safeDecode(v: string): string {
+  try {
+    return decodeURIComponent(v);
+  } catch {
+    return '';
+  }
+}
+
 export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
   const clock = config.clock ?? (() => new Date());
   const cookieNames = { ...DEFAULT_COOKIE_NAMES, ...config.cookieNames };
@@ -52,7 +61,7 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
   };
   const cookieOpts = (maxAgeSec: number): CookieOptions => ({
     maxAgeSec,
-    secure: config.publicUrl.startsWith('https'),
+    secure: new URL(config.publicUrl).protocol === 'https:',
     ...(config.cookieDomain ? { domain: config.cookieDomain } : {}),
   });
 
@@ -117,7 +126,7 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
       if (method === 'POST' && path === '/auth/logout') return await logout(request);
       if (method === 'POST' && path === '/auth/logout-everywhere') return await logoutEverywhere(request);
       const m = method === 'GET' ? /^\/auth\/([^/]+)\/start$/.exec(path) : null;
-      if (m) return await start(request, url, decodeURIComponent(m[1]!));
+      if (m) return await start(request, url, safeDecode(m[1]!));
       return undefined;
     } catch (err) {
       return errorResponse(err);
