@@ -111,7 +111,7 @@ export function pgAuthStore(pool: pg.Pool): AuthStore<pg.PoolClient> {
       // With a tx, lock every matching user row (suspended or not) so a suspension cannot commit before we do.
       const r = await db(tx).query(
         `select u.suspended_at from users u join identities i on i.user_id = u.id
-         where i.email_verified and lower(btrim(i.email)) = $1
+         where i.email_verified and lower(i.email) = $1
            and ($2::text is null or u.id <> $2)${tx ? ' for share of u' : ''}`,
         [normalizeEmail(email) ?? null, opts?.exceptUserId ?? null],
       );

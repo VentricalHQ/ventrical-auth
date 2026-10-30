@@ -73,8 +73,9 @@ export function createMemoryStore(clock: () => Date = () => new Date()): MemoryS
     async linkIdentity(userId, identity) {
       if (!users.has(userId)) throw new Error('foreign key violation: unknown user'); // like Postgres, not a DuplicateIdentityError
       if (identities.some((x) => x.provider === identity.provider && x.subject === identity.subject)) throw new DuplicateIdentityError();
-      const { email: _raw, ...rest } = identity;
-      identities.push({ ...rest, ...(norm(identity.email) !== undefined ? { email: norm(identity.email)! } : {}), userId });
+      const { email: raw, ...rest } = identity;
+      const email = norm(raw);
+      identities.push({ ...rest, ...(email !== undefined ? { email } : {}), userId });
     },
     async updateIdentity(provider, subject, update) {
       const i = identities.find((x) => x.provider === provider && x.subject === subject);
