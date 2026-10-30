@@ -125,7 +125,7 @@ export function pgAuthStore(pool: pg.Pool): AuthStore<pg.PoolClient> {
 
     async getSessionWithExpiry(idHash, now) {
       const r = await pool.query(
-        `select u.id, u.email, u.name, s.expires_at, s.identity_provider, s.identity_subject,
+        `select u.id, u.email, u.name, s.expires_at, s.created_at, s.identity_provider, s.identity_subject,
                 case when i.email_verified then i.email end as verified_email
          from sessions s join users u on u.id = s.user_id
          left join identities i on i.provider = s.identity_provider and i.subject = s.identity_subject
@@ -140,6 +140,7 @@ export function pgAuthStore(pool: pg.Pool): AuthStore<pg.PoolClient> {
       return {
         user: toUser(row),
         expiresAt: row.expires_at as Date,
+        createdAt: row.created_at as Date,
         ...(identity ? { identity } : {}),
         verifiedEmail: (row.verified_email as string | null) ?? null,
       };
@@ -149,8 +150,8 @@ export function pgAuthStore(pool: pg.Pool): AuthStore<pg.PoolClient> {
       await pool.query('update sessions set expires_at = $2 where id_hash = $1', [idHash, expiresAt]);
     },
 
-    async deleteSession(idHash) {
-      await pool.query('delete from sessions where id_hash = $1', [idHash]);
+    async deleteSession(idHash, tx) {
+      await db(tx).query('delete from sessions where id_hash = $1', [idHash]);
     },
 
     async deleteSessionsForUser(userId, tx) {
@@ -158,8 +159,11 @@ export function pgAuthStore(pool: pg.Pool): AuthStore<pg.PoolClient> {
       return r.rowCount ?? 0;
     },
 
-    async purgeExpiredSessions(now) {
-      const r = await pool.query('delete from sessions where expires_at <= $1', [now]);
+    async purgeExpiredSessions(now, opts) {
+      const r = opts?.maxAgeMs === undefined
+        ? await pool.query('delete from sessions where expires_at <= $1', [now])
+        // created_at + maxAge <= now, written as created_at <= now - maxAge.
+        : await pool.query('delete from sessions where expires_at <= $1 or created_at <= $2', [now, new Date(now.getTime() - opts.maxAgeMs)]);
       return r.rowCount ?? 0;
     },
 

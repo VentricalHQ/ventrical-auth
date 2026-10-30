@@ -5,6 +5,8 @@ import type { AuthStore } from '../src/types.js';
 export interface StoreHarness {
   store: AuthStore<any>;
   suspend(userId: string): Promise<void>;
+  /** Backdates a session's created_at (the store stamps it itself on insert). */
+  setCreatedAt(idHash: string, createdAt: Date): Promise<void>;
   /** Optional teardown (e.g. dropping a schema). */
   close?(): Promise<void>;
 }
@@ -308,6 +310,50 @@ export function storeContract(name: string, make: () => Promise<StoreHarness>): 
         throw boom;
       })).rejects.toBe(boom);
       expect(await store.findUserByIdentity('google', 'g1')).toBeUndefined();
+    });
+
+    it('getSessionWithExpiry returns createdAt', async () => {
+      const { store, setCreatedAt } = await fresh();
+      const user = await store.createUserWithIdentity({ ...IDENT, emailVerified: true });
+      await session(store, user.id, 'h1', future());
+      const t = new Date('2029-05-05T00:00:00.000Z');
+      await setCreatedAt('h1', t);
+      expect((await store.getSessionWithExpiry('h1', new Date(0)))?.createdAt?.getTime()).toBe(t.getTime());
+    });
+
+    it('purgeExpiredSessions with maxAgeMs also deletes sessions whose created_at + maxAgeMs <= now (boundary inclusive)', async () => {
+      const { store, setCreatedAt } = await fresh();
+      const user = await store.createUserWithIdentity({ ...IDENT, emailVerified: true });
+      const now = new Date('2030-01-01T00:00:00.000Z');
+      const MAX = 10 * 864e5;
+      for (const h of ['old', 'edge', 'young']) await session(store, user.id, h, new Date(now.getTime() + 100 * 864e5));
+      await session(store, user.id, 'expired', new Date(now.getTime() - 1));
+      await setCreatedAt('old', new Date(now.getTime() - MAX - 1));
+      await setCreatedAt('edge', new Date(now.getTime() - MAX));
+      await setCreatedAt('young', new Date(now.getTime() - MAX + 1));
+      await setCreatedAt('expired', new Date(now.getTime() - 1000));
+      // Without the option only expiry counts.
+      expect(await store.purgeExpiredSessions(now, {})).toBe(1);
+      expect(await store.purgeExpiredSessions(now, { maxAgeMs: MAX })).toBe(2);
+      const before = new Date(now.getTime() - 5000);
+      expect(await store.getSessionWithExpiry('young', before)).toBeDefined();
+      expect(await store.getSessionWithExpiry('old', before)).toBeUndefined();
+      expect(await store.getSessionWithExpiry('edge', before)).toBeUndefined();
+    });
+
+    it('deleteSession takes an optional tx: it commits with the transaction and rolls back with it', async () => {
+      const { store } = await fresh();
+      const user = await store.createUserWithIdentity({ ...IDENT, emailVerified: true });
+      await session(store, user.id, 'a', future());
+      await session(store, user.id, 'b', future());
+      await expect(store.transaction(async (tx) => {
+        await store.deleteSession('a', tx);
+        throw new Error('boom');
+      })).rejects.toThrow('boom');
+      expect(await store.getSessionWithExpiry('a', new Date())).toBeDefined();
+      await store.transaction((tx) => store.deleteSession('a', tx));
+      expect(await store.getSessionWithExpiry('a', new Date())).toBeUndefined();
+      expect(await store.getSessionWithExpiry('b', new Date())).toBeDefined();
     });
   });
 }

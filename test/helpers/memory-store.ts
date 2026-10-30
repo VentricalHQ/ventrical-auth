@@ -2,7 +2,7 @@ import { DuplicateIdentityError } from '../../src/errors.js';
 import type { AuthStore, AuthUser, NewIdentity } from '../../src/types.js';
 
 interface StoredIdentity extends NewIdentity { userId: string }
-interface StoredSession { userId: string; expiresAt: Date; identity: { provider: string; subject: string } }
+interface StoredSession { userId: string; expiresAt: Date; createdAt: Date; identity: { provider: string; subject: string } }
 interface StoredUser extends AuthUser { suspended: boolean }
 
 /** A distinct handle per transaction, so tests can tell whether two calls shared one. */
@@ -13,7 +13,8 @@ export type MemoryStore = AuthStore<MemoryTx> & {
   sessions: Map<string, StoredSession>;
 };
 
-export function createMemoryStore(): MemoryStore {
+/** `clock` stamps created_at on new sessions (the handler's injected clock in tests); defaults to real time. */
+export function createMemoryStore(clock: () => Date = () => new Date()): MemoryStore {
   let users = new Map<string, StoredUser>();
   let identities: StoredIdentity[] = [];
   let sessions = new Map<string, StoredSession>();
@@ -85,7 +86,7 @@ export function createMemoryStore(): MemoryStore {
     },
     async createSessionUnlessSuspended(userId, idHash, expiresAt, identity) {
       if (!users.has(userId) || isSuspended(userId)) return false; // unknown user: refused, as the pg store does
-      sessions.set(idHash, { userId, expiresAt, identity });
+      sessions.set(idHash, { userId, expiresAt, createdAt: clock(), identity });
       return true;
     },
     async getSessionWithExpiry(idHash, now) {
@@ -95,13 +96,13 @@ export function createMemoryStore(): MemoryStore {
       if (!u || u.suspended) return undefined;
       const i = identities.find((x) => x.provider === s.identity.provider && x.subject === s.identity.subject);
       const verifiedEmail = i && i.emailVerified && i.email ? i.email : null;
-      return { user: publicUser(u), expiresAt: s.expiresAt, identity: s.identity, verifiedEmail };
+      return { user: publicUser(u), expiresAt: s.expiresAt, createdAt: s.createdAt, identity: s.identity, verifiedEmail };
     },
     async touchSession(idHash, expiresAt) {
       const s = sessions.get(idHash);
       if (s) s.expiresAt = expiresAt;
     },
-    async deleteSession(idHash) {
+    async deleteSession(idHash, _tx) {
       sessions.delete(idHash);
     },
     async deleteSessionsForUser(userId) {
@@ -109,9 +110,12 @@ export function createMemoryStore(): MemoryStore {
       for (const [h, s] of sessions) if (s.userId === userId) { sessions.delete(h); n++; }
       return n;
     },
-    async purgeExpiredSessions(now) {
+    async purgeExpiredSessions(now, opts) {
       let n = 0;
-      for (const [h, s] of sessions) if (s.expiresAt.getTime() <= now.getTime()) { sessions.delete(h); n++; }
+      for (const [h, s] of sessions) {
+        const capped = opts?.maxAgeMs !== undefined && s.createdAt.getTime() + opts.maxAgeMs <= now.getTime();
+        if (s.expiresAt.getTime() <= now.getTime() || capped) { sessions.delete(h); n++; }
+      }
       return n;
     },
     async isSuspendedCredential(idHash, now) {

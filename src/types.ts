@@ -68,6 +68,11 @@ export interface AuthStore<Tx = unknown> {
         expiresAt: Date;
         identity?: { provider: string; subject: string };
         /**
+         * When the session row was created (sessions.created_at). Optional: a store that omits it skips the
+         * `sessionMaxAgeMs` cap for its sessions.
+         */
+        createdAt?: Date;
+        /**
          * The stored email of the identity the session was created with, when that identity is verified; null when the
          * session has no identity, the identity is unverified, or it has no email. Optional so existing custom stores
          * keep compiling: an omitted value is treated as null.
@@ -77,7 +82,8 @@ export interface AuthStore<Tx = unknown> {
     | undefined
   >;
   touchSession(idHash: string, expiresAt: Date): Promise<void>;
-  deleteSession(idHash: string): Promise<void>;
+  /** With a tx the delete commits or rolls back with it. */
+  deleteSession(idHash: string, tx?: Tx): Promise<void>;
   deleteSessionsForUser(userId: string, tx?: Tx): Promise<number>;
   /**
    * Optional. Updates the stored email and email_verified of an existing identity. `email` undefined leaves the
@@ -90,8 +96,11 @@ export interface AuthStore<Tx = unknown> {
     update: { email?: string | null; emailVerified: boolean },
     tx?: Tx,
   ): Promise<void>;
-  /** Deletes every session with expires_at <= now and returns how many were removed. */
-  purgeExpiredSessions(now: Date): Promise<number>;
+  /**
+   * Deletes every session with expires_at <= now and returns how many were removed. With `opts.maxAgeMs` it also
+   * deletes sessions with created_at + maxAgeMs <= now.
+   */
+  purgeExpiredSessions(now: Date, opts?: { maxAgeMs?: number }): Promise<number>;
   isSuspendedCredential?(idHash: string, now: Date): Promise<boolean>;
 }
 
@@ -162,6 +171,11 @@ export interface AuthConfig<Tx = unknown> {
   /** Setting it switches the default cookie names back to the plain ones (a __Host- cookie cannot carry a Domain). */
   cookieDomain?: string;
   sessionTtlMs?: number;
+  /**
+   * Absolute cap on a session's life, counted from its creation; refresh never extends past it. Positive, finite;
+   * default 90 days.
+   */
+  sessionMaxAgeMs?: number;
   /** Longest the handler waits for hooks.onError before responding anyway. Positive, finite; default 2000. */
   onErrorTimeoutMs?: number;
   clock?: () => Date;

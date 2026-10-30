@@ -48,6 +48,10 @@ function validateConfig(config: AuthConfig<any>): void {
   if (ttl !== undefined && !(typeof ttl === 'number' && Number.isFinite(ttl) && ttl > 0)) {
     throw new Error('Invalid auth config: sessionTtlMs must be a positive finite number');
   }
+  const maxAge = config.sessionMaxAgeMs;
+  if (maxAge !== undefined && !(typeof maxAge === 'number' && Number.isFinite(maxAge) && maxAge > 0)) {
+    throw new Error('Invalid auth config: sessionMaxAgeMs must be a positive finite number');
+  }
 }
 
 export type { Auth } from './handler.js';

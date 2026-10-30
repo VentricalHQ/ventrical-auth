@@ -63,6 +63,7 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
     cookieNames,
     publicUrl: config.publicUrl,
     sessionTtlMs: config.sessionTtlMs ?? SESSION_TTL_MS,
+    ...(config.sessionMaxAgeMs !== undefined ? { sessionMaxAgeMs: config.sessionMaxAgeMs } : {}),
     clock,
     ...(config.cookieDomain ? { cookieDomain: config.cookieDomain } : {}),
   });
@@ -258,7 +259,8 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
     }
 
     const { id, idHash } = newSessionId();
-    const expiresAt = new Date(clock().getTime() + (config.sessionTtlMs ?? SESSION_TTL_MS));
+    const signedInAt = clock();
+    const expiresAt = sessions.newExpiry(signedInAt);
     const attempt = (found: Awaited<ReturnType<typeof config.store.findUserByIdentity>>) => config.store.transaction(async (tx) => {
       let user: AuthUser | undefined = found && { id: found.id, email: found.email, name: found.name };
       let isNew = false;
@@ -303,7 +305,7 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
       return err instanceof SuspendedSignal ? await signinError('suspended') : await signinError('sign_in_failed', err);
     }
     // Only after the transaction has committed.
-    return redirectTo(target, [sessions.sessionCookie(id)]);
+    return redirectTo(target, [sessions.sessionCookie(id, expiresAt.getTime() - signedInAt.getTime())]);
   }
 
   async function callbackRoute(request: Request, url: URL, name: string): Promise<Response> {

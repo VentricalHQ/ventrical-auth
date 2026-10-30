@@ -70,4 +70,13 @@ describe('createAuth config validation', () => {
   it('accepts a positive sessionTtlMs', () => {
     expect(() => createAuth({ ...base(), sessionTtlMs: 1000 })).not.toThrow();
   });
+
+  it('validates sessionMaxAgeMs like sessionTtlMs', () => {
+    const msg = 'Invalid auth config: sessionMaxAgeMs must be a positive finite number';
+    for (const bad of [0, -1, Number.NaN, Infinity, '90', null]) {
+      expect(() => createAuth({ ...base(), sessionMaxAgeMs: bad as never })).toThrow(msg);
+    }
+    expect(() => createAuth({ ...base(), sessionMaxAgeMs: 1000 })).not.toThrow();
+    expect(() => createAuth({ ...base() })).not.toThrow();
+  });
 });

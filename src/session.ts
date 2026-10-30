@@ -12,6 +12,8 @@ export type SessionUser = AuthUser & { verifiedEmail: string | null };
 /** Default session life: 30 days. */
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 /** A session with less than 29 days left is refreshed on use. */
+/** Default absolute cap on a session's life, from its creation: 90 days. */
+export const SESSION_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
 export const REFRESH_BELOW_MS = 29 * 24 * 60 * 60 * 1000;
 
 export interface SessionResult {
@@ -32,18 +34,27 @@ export interface SessionsConfig {
   cookieDomain?: string;
   publicUrl: string;
   sessionTtlMs: number;
+  sessionMaxAgeMs?: number;
   clock: () => Date;
 }
 
 export function makeSessions(cfg: SessionsConfig) {
+  const maxAgeMs = cfg.sessionMaxAgeMs ?? SESSION_MAX_AGE_MS;
+  /** Expiry for a session created at `createdAt`, if refreshed at `now`: never beyond createdAt + cap. */
+  const expiryFor = (now: Date, createdAt: Date): Date =>
+    new Date(Math.min(now.getTime() + cfg.sessionTtlMs, createdAt.getTime() + maxAgeMs));
   const opts = (maxAgeSec: number): CookieOptions => ({
     maxAgeSec,
     secure: new URL(cfg.publicUrl).protocol === 'https:',
     ...(cfg.cookieDomain ? { domain: cfg.cookieDomain } : {}),
   });
 
-  function sessionCookie(id: string): string {
-    return serializeCookie(cfg.cookieNames.session, id, opts(cfg.sessionTtlMs / 1000));
+  /** Expiry of a session created now. */
+  const newExpiry = (now: Date): Date => expiryFor(now, now);
+
+  /** `lifeMs` is how long the cookie should live; default is a new session's life, min(ttl, cap). */
+  function sessionCookie(id: string, lifeMs: number = Math.min(cfg.sessionTtlMs, maxAgeMs)): string {
+    return serializeCookie(cfg.cookieNames.session, id, opts(Math.max(0, Math.floor(lifeMs / 1000))));
   }
 
   function clearSessionCookie(): string {
@@ -60,10 +71,20 @@ export function makeSessions(cfg: SessionsConfig) {
     const idHash = hashToken(id);
     const found = await cfg.store.getSessionWithExpiry(idHash, now);
     if (!found) return undefined;
+    if (found.createdAt && now.getTime() >= found.createdAt.getTime() + maxAgeMs) {
+      // Past the absolute cap: signed out. Deleting is housekeeping, so a failure must not change the answer.
+      await Promise.resolve(cfg.store.deleteSession(idHash)).catch(() => undefined);
+      return undefined;
+    }
     const result: SessionResult = { user: { ...found.user, verifiedEmail: found.verifiedEmail ?? null }, id };
     if (found.expiresAt.getTime() - now.getTime() < REFRESH_BELOW_MS) {
-      await cfg.store.touchSession(idHash, new Date(now.getTime() + cfg.sessionTtlMs));
-      result.setCookie = sessionCookie(id);
+      // A store without createdAt cannot be capped on refresh: the plain ttl applies.
+      const next = found.createdAt ? expiryFor(now, found.createdAt) : new Date(now.getTime() + cfg.sessionTtlMs);
+      // Near the cap there is nothing left to extend; do not rewrite the row or the cookie on every request.
+      if (next.getTime() > found.expiresAt.getTime()) {
+        await cfg.store.touchSession(idHash, next);
+        result.setCookie = sessionCookie(id, next.getTime() - now.getTime());
+      }
     }
     return result;
   }
@@ -84,5 +105,5 @@ export function makeSessions(cfg: SessionsConfig) {
     throw new AuthHttpError(401, 'unauthenticated', 'Sign in required');
   }
 
-  return { getSession, requireSession, sessionCookie, clearSessionCookie };
+  return { getSession, requireSession, sessionCookie, clearSessionCookie, newExpiry };
 }
