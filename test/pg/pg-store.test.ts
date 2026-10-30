@@ -31,6 +31,7 @@ describe.skipIf(!URL_ENV)('pgAuthStore (live postgres)', () => {
       pool,
       store: pgAuthStore(pool),
       suspend: async (userId) => { await pool.query('update users set suspended_at = now() where id = $1', [userId]); },
+      moveIdentity: async (p, s, to) => { await pool.query('update identities set user_id = $3 where provider = $1 and subject = $2', [p, s, to]); },
       setCreatedAt: async (h, d) => { await pool.query('update sessions set created_at = $2 where id_hash = $1', [h, d]); },
       close: async () => {
         await pool.end();

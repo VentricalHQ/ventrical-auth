@@ -10,6 +10,8 @@ export interface MemoryTx { readonly id: number }
 
 export type MemoryStore = AuthStore<MemoryTx> & {
   suspend(userId: string): void;
+  /** Test-only: reassigns an identity to another user (as an account merge would). */
+  moveIdentity(provider: string, subject: string, toUserId: string): void;
   sessions: Map<string, StoredSession>;
 };
 
@@ -51,6 +53,10 @@ export function createMemoryStore(clock: () => Date = () => new Date()): MemoryS
     suspend(userId) {
       const u = users.get(userId);
       if (u) u.suspended = true;
+    },
+    moveIdentity(provider, subject, toUserId) {
+      const i = identities.find((x) => x.provider === provider && x.subject === subject);
+      if (i) i.userId = toUserId;
     },
     transaction(fn) {
       const run = queue.then(() => runTx(fn), () => runTx(fn));
@@ -100,7 +106,7 @@ export function createMemoryStore(clock: () => Date = () => new Date()): MemoryS
       if (!s || s.expiresAt.getTime() <= now.getTime()) return undefined;
       const u = users.get(s.userId);
       if (!u || u.suspended) return undefined;
-      const i = identities.find((x) => x.provider === s.identity.provider && x.subject === s.identity.subject);
+      const i = identities.find((x) => x.provider === s.identity.provider && x.subject === s.identity.subject && x.userId === s.userId);
       const verifiedEmail = i && i.emailVerified && i.email ? i.email : null;
       return { user: publicUser(u), expiresAt: s.expiresAt, createdAt: s.createdAt, identity: s.identity, verifiedEmail };
     },

@@ -7,6 +7,8 @@ export interface StoreHarness {
   suspend(userId: string): Promise<void>;
   /** Backdates a session's created_at (the store stamps it itself on insert). */
   setCreatedAt(idHash: string, createdAt: Date): Promise<void>;
+  /** Test-only: reassigns an identity to another user, as an account merge would. */
+  moveIdentity(provider: string, subject: string, toUserId: string): Promise<void>;
   /** Optional teardown (e.g. dropping a schema). */
   close?(): Promise<void>;
 }
@@ -290,6 +292,16 @@ export function storeContract(name: string, make: () => Promise<StoreHarness>): 
       expect((await store.getSessionWithExpiry('h1', new Date()))?.verifiedEmail ?? null).toBeNull();
       await store.transaction((tx) => store.createSessionUnlessSuspended(u.id, 'h2', future(), { provider: 'github', subject: 'h2' }, tx));
       expect((await store.getSessionWithExpiry('h2', new Date()))?.verifiedEmail).toBe('h@example.test');
+    });
+
+    it('verifiedEmail is null for the old user session once its identity has moved to another user', async () => {
+      const { store, moveIdentity } = await fresh();
+      const a = await store.createUserWithIdentity({ ...IDENT, email: 'a@example.test', emailVerified: true });
+      const b = await store.createUserWithIdentity({ provider: 'github', subject: 'b1', emailVerified: false });
+      await session(store, a.id, 'h1', future());
+      expect((await store.getSessionWithExpiry('h1', new Date()))?.verifiedEmail).toBe('a@example.test');
+      await moveIdentity(IDENT.provider, IDENT.subject, b.id);
+      expect((await store.getSessionWithExpiry('h1', new Date()))?.verifiedEmail ?? null).toBeNull();
     });
 
     it('verifiedEmail follows updateIdentity (new email, unverified, cleared)', async () => {

@@ -133,7 +133,7 @@ export function pgAuthStore(pool: pg.Pool): AuthStore<pg.PoolClient> {
         `select u.id, u.email, u.name, s.expires_at, s.created_at, s.identity_provider, s.identity_subject,
                 case when i.email_verified then i.email end as verified_email
          from sessions s join users u on u.id = s.user_id
-         left join identities i on i.provider = s.identity_provider and i.subject = s.identity_subject
+         left join identities i on i.provider = s.identity_provider and i.subject = s.identity_subject and i.user_id = s.user_id
          where s.id_hash = $1 and s.expires_at > $2 and u.suspended_at is null`,
         [idHash, now],
       );
