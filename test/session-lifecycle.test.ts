@@ -152,6 +152,62 @@ function suite(name: string, make: () => Promise<Harness>) {
       } finally { await h.close?.(); }
     });
   });
+
+  describe(`${name}: signing in deletes the session the request carried`, () => {
+    const alive = async (h: Harness, cookie: string) => !!(await h.store.getSessionWithExpiry(hashToken(idOf(cookie)), h.clock.now));
+
+    it('the old session is gone after a sign-in, and the new one works', async () => {
+      const h = await make();
+      try {
+        const auth = setup(h, { google: G1, github: { subject: 'h1', emailVerified: true, email: 'h1@example.test' } });
+        const old = cookieOf(await flow(auth, 'google'));
+        expect(await alive(h, old)).toBe(true);
+        const res = await flow(auth, 'github', { cbCookie: old }); // a different account signs in over the old cookie
+        const fresh = cookieOf(res);
+        expect(fresh).not.toBe(old);
+        expect(await alive(h, old)).toBe(false);
+        expect(await auth.getSession(req('GET', '/x', { cookie: old }))).toBeUndefined();
+        expect((await auth.getSession(req('GET', '/x', { cookie: fresh })))?.user.email).toBe('h1@example.test');
+      } finally { await h.close?.(); }
+    });
+
+    it('signing in again as the same user also drops the old session', async () => {
+      const h = await make();
+      try {
+        const auth = setup(h, { google: G1 });
+        const old = cookieOf(await flow(auth, 'google'));
+        const fresh = cookieOf(await flow(auth, 'google', { cbCookie: old }));
+        expect(await alive(h, old)).toBe(false);
+        expect(await alive(h, fresh)).toBe(true);
+      } finally { await h.close?.(); }
+    });
+
+    it('a sign-in that rolls back (suspended) keeps the old session', async () => {
+      const h = await make();
+      try {
+        const auth = setup(h, { google: G1, github: { subject: 'h1', emailVerified: true, email: 'h1@example.test' } });
+        const old = cookieOf(await flow(auth, 'google'));
+        await flow(auth, 'github'); // creates user h1 (and a session we ignore)
+        await h.suspend((await h.store.findUserByIdentity('github', 'h1'))!.id);
+        const res = await flow(auth, 'github', { cbCookie: old });
+        expect(res.headers.get('location')).toBe(`${FRONT}/signin?error=suspended`);
+        expect(setCookie(res, SESSION)).toBeUndefined();
+        expect(await alive(h, old)).toBe(true);
+      } finally { await h.close?.(); }
+    });
+
+    it('the link path does not delete the session', async () => {
+      const h = await make();
+      try {
+        const auth = setup(h, { google: G1, github: { subject: 'h1', emailVerified: true, email: 'h1@example.test' } });
+        const cur = cookieOf(await flow(auth, 'google'));
+        const res = await flow(auth, 'github', { startCookie: cur, cbCookie: cur });
+        expect(res.headers.get('location')).toBe(`${FRONT}/`);
+        expect(setCookie(res, SESSION)).toBeUndefined();
+        expect(await alive(h, cur)).toBe(true);
+      } finally { await h.close?.(); }
+    });
+  });
 }
 
 suite('memory', async () => {
@@ -174,7 +230,8 @@ describe.skipIf(!URL_ENV)('pg', () => {
     for (const f of readdirSync(migrationsDir).filter((n) => n.endsWith('.sql')).sort()) await pool.query(readFileSync(join(migrationsDir, f), 'utf8'));
     return {
       store: pgAuthStore(pool),
-      clock: { now: new Date('2030-01-01T00:00:00Z') },
+      // Real time: the database stamps created_at itself, so a far-off fake clock would trip the cap.
+      clock: { now: new Date() },
       suspend: async (id) => { await pool.query('update users set suspended_at = now() where id = $1', [id]); },
       setCreatedAt: async (h, d) => { await pool.query('update sessions set created_at = $2 where id_hash = $1', [h, d]); },
       close: async () => { await pool.end(); await admin.query(`drop schema ${schema} cascade`); },
