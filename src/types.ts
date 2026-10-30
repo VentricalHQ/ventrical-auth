@@ -22,9 +22,23 @@ export interface NewIdentity {
   emailVerified: boolean;
 }
 
+/** The stored email and verified flag of one identity. `email` is null or absent when none is stored. */
+export interface StoredIdentityEmail {
+  email?: string | null;
+  emailVerified: boolean;
+}
+
 export interface AuthStore<Tx = unknown> {
   transaction<T>(fn: (tx: Tx) => Promise<T>): Promise<T>;
-  findUserByIdentity(provider: ProviderName, subject: string, tx?: Tx): Promise<AuthUser | undefined>;
+  /**
+   * `identity` carries the identity's stored email and verified flag. Optional for compatibility: when a store omits
+   * it, the handler cannot tell whether the email changed and does not refresh it.
+   */
+  findUserByIdentity(
+    provider: ProviderName,
+    subject: string,
+    tx?: Tx,
+  ): Promise<(AuthUser & { identity?: StoredIdentityEmail }) | undefined>;
   /**
    * Must throw DuplicateIdentityError when (provider, subject) already exists. The handler then abandons the
    * transaction (it rolls back entirely) and re-runs it once, so no savepoint is needed.
@@ -54,7 +68,8 @@ export interface AuthStore<Tx = unknown> {
   deleteSessionsForUser(userId: string, tx?: Tx): Promise<number>;
   /**
    * Optional. Updates the stored email and email_verified of an existing identity. `email` undefined leaves the
-   * email unchanged, null clears it. A no-op when the identity does not exist.
+   * email unchanged, null clears it. A no-op when the identity does not exist. The handler calls it inside the
+   * sign-in transaction of a returning user whose provider email or verified flag changed.
    */
   updateIdentity?(
     provider: ProviderName,

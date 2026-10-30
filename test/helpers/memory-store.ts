@@ -57,7 +57,7 @@ export function createMemoryStore(): MemoryStore {
     async findUserByIdentity(provider, subject) {
       const i = identities.find((x) => x.provider === provider && x.subject === subject);
       const u = i && users.get(i.userId);
-      return u ? publicUser(u) : undefined;
+      return u && i ? { ...publicUser(u), identity: { email: i.email ?? null, emailVerified: i.emailVerified } } : undefined;
     },
     async createUserWithIdentity(p) {
       if (identities.some((x) => x.provider === p.provider && x.subject === p.subject)) throw new DuplicateIdentityError();

@@ -62,11 +62,15 @@ export function pgAuthStore(pool: pg.Pool): AuthStore<pg.PoolClient> {
 
     async findUserByIdentity(provider, subject, tx) {
       const r = await db(tx).query(
-        `select u.id, u.email, u.name from users u join identities i on i.user_id = u.id
+        `select u.id, u.email, u.name, i.email as identity_email, i.email_verified as identity_verified
+         from users u join identities i on i.user_id = u.id
          where i.provider = $1 and i.subject = $2`,
         [provider, subject],
       );
-      return r.rows[0] ? toUser(r.rows[0]) : undefined;
+      const row = r.rows[0];
+      return row
+        ? { ...toUser(row), identity: { email: row.identity_email as string | null, emailVerified: row.identity_verified as boolean } }
+        : undefined;
     },
 
     async createUserWithIdentity(p, tx) {

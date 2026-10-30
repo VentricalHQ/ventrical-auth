@@ -31,9 +31,24 @@ export function storeContract(name: string, make: () => Promise<StoreHarness>): 
       const { store } = await fresh();
       const user = await store.createUserWithIdentity({ ...IDENT, email: 'a@example.test', emailVerified: true, name: 'Ann' });
       expect(user).toMatchObject({ email: 'a@example.test', name: 'Ann' });
-      expect(await store.findUserByIdentity('google', 'g1')).toEqual(user);
+      expect(await store.findUserByIdentity('google', 'g1')).toMatchObject(user);
       expect(await store.findUserByIdentity('google', 'other')).toBeUndefined();
       expect(await store.findUserByIdentity('github', 'g1')).toBeUndefined();
+    });
+
+    it('findUserByIdentity exposes the stored identity email and verified flag, and tracks updateIdentity', async () => {
+      const { store } = await fresh();
+      await store.createUserWithIdentity({ ...IDENT, email: 'Ann@Example.test', emailVerified: true });
+      await store.createUserWithIdentity({ provider: 'github', subject: 'h1', emailVerified: false });
+      expect((await store.findUserByIdentity('google', 'g1'))?.identity).toEqual({ email: 'Ann@Example.test', emailVerified: true });
+      const bare = (await store.findUserByIdentity('github', 'h1'))?.identity;
+      expect(bare?.emailVerified).toBe(false);
+      expect(bare?.email ?? null).toBeNull();
+      if (store.updateIdentity) {
+        await store.updateIdentity('google', 'g1', { email: 'b@example.test', emailVerified: false });
+        expect((await store.findUserByIdentity('google', 'g1'))?.identity).toEqual({ email: 'b@example.test', emailVerified: false });
+        expect((await store.transaction((tx) => store.findUserByIdentity('google', 'g1', tx)))?.identity?.email).toBe('b@example.test');
+      }
     });
 
     it('stores null for a missing email and name', async () => {
@@ -235,7 +250,7 @@ export function storeContract(name: string, make: () => Promise<StoreHarness>): 
     it('transaction commits on success and returns the result', async () => {
       const { store } = await fresh();
       const user = await store.transaction((tx) => store.createUserWithIdentity({ ...IDENT, emailVerified: true }, tx));
-      expect(await store.findUserByIdentity('google', 'g1')).toEqual(user);
+      expect(await store.findUserByIdentity('google', 'g1')).toMatchObject(user);
     });
 
     it('transaction rolls back on throw and rethrows the original error', async () => {

@@ -235,9 +235,16 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
 
     const { id, idHash } = newSessionId();
     const expiresAt = new Date(clock().getTime() + (config.sessionTtlMs ?? SESSION_TTL_MS));
-    const attempt = (found: AuthUser | undefined) => config.store.transaction(async (tx) => {
-      let user: AuthUser | undefined = found;
+    const attempt = (found: Awaited<ReturnType<typeof config.store.findUserByIdentity>>) => config.store.transaction(async (tx) => {
+      let user: AuthUser | undefined = found && { id: found.id, email: found.email, name: found.name };
       let isNew = false;
+      if (found && user && config.store.updateIdentity && profile.email !== undefined && found.identity
+        && (found.identity.email !== profile.email || found.identity.emailVerified !== profile.emailVerified)) {
+        // Returning user whose provider email changed: keep the stored identity current (it feeds the suspended-email
+        // check). Same tx, so it commits or rolls back with the sign-in; a retry re-reads the identity and is idempotent.
+        // A profile without an email never clears the stored one.
+        await config.store.updateIdentity(provider.name, profile.subject, { email: profile.email, emailVerified: profile.emailVerified }, tx);
+      }
       if (!user) {
         // Authoritative suspended check, in the same transaction as the writes below.
         if (suspendedEmail !== undefined && (await config.store.emailBelongsToSuspendedUser(suspendedEmail, tx))) {
