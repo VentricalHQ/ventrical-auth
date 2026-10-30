@@ -49,7 +49,10 @@ describe('hooks.onError events', () => {
     const ctl = new AbortController();
     const spy = vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => ctl.signal);
     try {
+      let hanging!: () => void;
+      const fetchCalled = new Promise<void>((r) => { hanging = r; });
       const fetchFn = (async (_u: string | URL | Request, init?: RequestInit) => new Promise<Response>((_, reject) => {
+        hanging();
         init?.signal?.addEventListener('abort', () => reject(init.signal!.reason));
       })) as typeof fetch;
       const { auth, events } = setup({}, { fetch: fetchFn });
@@ -57,7 +60,7 @@ describe('hooks.onError events', () => {
       const oauth = `__Host-ventrical_oauth=${encodeURIComponent(setCookie(start, '__Host-ventrical_oauth')!.value)}`;
       const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
       const pending = auth.handle(req('GET', `/auth/github/callback?code=c&state=${encodeURIComponent(state)}`, { cookie: oauth }));
-      await new Promise((r) => setTimeout(r, 10));
+      await fetchCalled;
       ctl.abort(new DOMException('timed out', 'TimeoutError'));
       const res = (await pending)!;
       expect(res.status).toBe(400);

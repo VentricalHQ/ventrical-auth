@@ -47,7 +47,7 @@ export function microsoftProfile(claims: Claims): ProviderProfile {
   return profile(sub, str(claims.preferred_username), false, str(claims.name));
 }
 
-const GITHUB_TIMEOUT_MS = 5000;
+export const GITHUB_TIMEOUT_MS = 5000;
 
 export async function fetchGithubProfile(accessToken: string, fetchFn: typeof fetch = fetch, userAgent = 'ventrical-auth'): Promise<ProviderProfile> {
   const headers = {

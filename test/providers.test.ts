@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createProviders, fetchGithubProfile, googleProfile, issOf, microsoftProfile, PROVIDER_ORDER } from '../src/providers.js';
+import { createProviders, GITHUB_TIMEOUT_MS, fetchGithubProfile, googleProfile, issOf, microsoftProfile, PROVIDER_ORDER } from '../src/providers.js';
 import { fakeIdp, makeKey, type SignOptions } from './helpers/fake-fetch.js';
 
 const providers = {
@@ -446,10 +446,11 @@ describe('ID token signature verification (JWKS)', () => {
 });
 
 describe('github fetch timeouts', () => {
-  const hangingFetch = (signals: Array<AbortSignal | undefined>, hangAt: string) => (async (input: string | URL | Request, init?: RequestInit) => {
+  const hangingFetch = (signals: Array<AbortSignal | undefined>, hangAt: string, onHang?: () => void) => (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     signals.push(init?.signal ?? undefined);
     if (url === hangAt) {
+      onHang?.();
       return new Promise<Response>((_, reject) => {
         init?.signal?.addEventListener('abort', () => reject(init.signal!.reason));
       });
@@ -471,14 +472,16 @@ describe('github fetch timeouts', () => {
     ['user GET', 'https://api.github.com/user'],
     ['emails GET', 'https://api.github.com/user/emails'],
   ] as const) {
-    it(`a ${name} that never answers is aborted at the 5000 ms timeout and the exchange rejects`, async () => {
+    it(`a ${name} that never answers is aborted at the GitHub timeout and the exchange rejects`, async () => {
       const ctl = new AbortController();
       const spy = vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => ctl.signal);
       try {
         const signals: Array<AbortSignal | undefined> = [];
-        const result = mk(hangingFetch(signals, url)).github!.exchange('c', 'x', ctx).catch((e: Error) => e);
-        await new Promise((r) => setTimeout(r, 10));
-        expect(spy).toHaveBeenLastCalledWith(5000);
+        let hanging!: () => void;
+        const pending = new Promise<void>((r) => { hanging = r; });
+        const result = mk(hangingFetch(signals, url, hanging)).github!.exchange('c', 'x', ctx).catch((e: Error) => e);
+        await pending;
+        expect(spy).toHaveBeenLastCalledWith(GITHUB_TIMEOUT_MS);
         ctl.abort(new DOMException('timed out', 'TimeoutError'));
         expect(await result).toBeInstanceOf(Error);
       } finally { spy.mockRestore(); }
