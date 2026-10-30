@@ -83,6 +83,8 @@ export function pgAuthStore(pool: pg.Pool): AuthStore<pg.PoolClient> {
     },
 
     async updateIdentity(provider, subject, update, tx) {
+      // Two statements on purpose: `email` undefined must leave the column alone, while null must clear it. A single
+      // parameterised update cannot tell the two apart (both arrive as null), so the unchanged case omits the column.
       if (update.email === undefined) {
         await db(tx).query(
           'update identities set email_verified = $3 where provider = $1 and subject = $2',

@@ -196,6 +196,17 @@ export function storeContract(name: string, make: () => Promise<StoreHarness>): 
       expect(await store.emailBelongsToSuspendedUser('new@example.test')).toBe(false);
     });
 
+    it('updateIdentity keeps a mixed-case email matchable case-insensitively', async () => {
+      const { store, suspend } = await fresh();
+      if (!store.updateIdentity) throw new Error('updateIdentity missing');
+      const user = await store.createUserWithIdentity({ ...IDENT, email: 'old@example.test', emailVerified: true });
+      await suspend(user.id);
+      await store.updateIdentity('google', 'g1', { email: 'New@Example.test', emailVerified: true });
+      expect(await store.emailBelongsToSuspendedUser('new@example.test')).toBe(true);
+      expect(await store.emailBelongsToSuspendedUser('NEW@EXAMPLE.TEST')).toBe(true);
+      expect(await store.emailBelongsToSuspendedUser('old@example.test')).toBe(false);
+    });
+
     it('updateIdentity is a no-op for an unknown identity', async () => {
       const { store } = await fresh();
       if (!store.updateIdentity) throw new Error('updateIdentity missing');
