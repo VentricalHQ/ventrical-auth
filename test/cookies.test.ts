@@ -60,7 +60,10 @@ describe('oauth state', () => {
     expect(openOAuthState(undefined, key)).toBeUndefined();
     expect(openOAuthState('', key)).toBeUndefined();
     expect(openOAuthState('garbage', key)).toBeUndefined();
-    expect(openOAuthState(sealed.slice(0, -4) + 'AAAA', key)).toBeUndefined();
+    const mid = Math.floor(sealed.length / 2);
+    const tampered = sealed.slice(0, mid) + (sealed[mid] === 'A' ? 'B' : 'A') + sealed.slice(mid + 1);
+    expect(tampered).not.toBe(sealed);
+    expect(openOAuthState(tampered, key)).toBeUndefined();
     expect(openOAuthState(sealed, Buffer.alloc(32, 1))).toBeUndefined();
     const bad = sealOAuthState({ provider: 'g' } as unknown as OAuthState, key);
     expect(openOAuthState(bad, key)).toBeUndefined();
@@ -97,6 +100,13 @@ describe('isSameOrigin', () => {
     expect(isSameOrigin(req({}), f, p)).toBe(false);
     expect(isSameOrigin(req({ origin: 'null' }), f, p)).toBe(false);
     expect(isSameOrigin(req({ origin: 'not a url' }), f, p)).toBe(false);
+  });
+  it('rejects suffix hosts, userinfo tricks and Origin: null with a valid Referer', () => {
+    expect(isSameOrigin(req({ origin: 'https://app.example.test.evil.test' }), f, p)).toBe(false);
+    expect(isSameOrigin(req({ origin: 'https://app.example.test@evil.test' }), f, p)).toBe(false);
+    expect(isSameOrigin(req({ referer: 'https://app.example.test.evil.test/x' }), f, p)).toBe(false);
+    expect(isSameOrigin(req({ referer: 'https://app.example.test@evil.test/x' }), f, p)).toBe(false);
+    expect(isSameOrigin(req({ origin: 'null', referer: 'https://app.example.test/' }), f, p)).toBe(false);
   });
   it('prefers Origin over Referer', () => {
     expect(isSameOrigin(req({ origin: 'https://evil.test', referer: 'https://app.example.test/' }), f, p)).toBe(false);
