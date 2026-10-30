@@ -45,7 +45,7 @@ function suite(name: string, make: () => Promise<Harness>) {
       await h.suspend(await userId(h.store, 'google', 'g-a'));
       const gh: ProviderProfile = { subject: 'h-evil', email: 'evil@example.test', emailVerified: true };
       const errors: { stage: string; code: string }[] = [];
-      const auth = setup({ github: gh, google: { subject: 'g-evil', email: 'evil2@example.test', emailVerified: true } }, h.store, errors);
+      const auth = setup({ github: gh }, h.store, errors);
       const first = await flow(auth, 'github');
       expect(first.headers.get('location')).toBe(`${FRONT}/`);
       return { h, e1, gh, auth, errors, session: sessionOf(first) };
@@ -64,14 +64,13 @@ function suite(name: string, make: () => Promise<Harness>) {
     });
 
     it('link: a signed-in user linking a provider whose verified email is suspended is refused', async () => {
-      const { h, e1, auth, errors, session } = await world();
+      const { h, e1, errors, session } = await world();
       try {
         const linker = setup({ google: { subject: 'g-new', email: e1, emailVerified: true } }, h.store, errors);
         const res = await flow(linker, 'google', session);
         expect(res.headers.get('location')).toBe(`${FRONT}/settings?error=suspended`);
         expect(await identityOf(h.store, 'google', 'g-new')).toBeUndefined();
         expect(errors).toContainEqual({ stage: 'link', code: 'suspended' });
-        void auth;
       } finally { await h.close?.(); }
     });
 
@@ -240,6 +239,22 @@ function suite(name: string, make: () => Promise<Harness>) {
         const u = (await h.store.findUserByIdentity('github', 'h-e'))!;
         expect(u.email).toBeNull();
         expect(u.identity?.email ?? null).toBeNull();
+      } finally { await h.close?.(); }
+    });
+
+    it('link: an unverified suspended email links unverified, and a later verified sign-in with it is refused', async () => {
+      const { h, e1, session } = await world();
+      try {
+        const profile: ProviderProfile = { subject: 'g-unv', email: e1, emailVerified: false };
+        const linker = setup({ google: profile }, h.store);
+        const res = await flow(linker, 'google', session);
+        expect(res.headers.get('location')).toBe(`${FRONT}/`);
+        expect(await identityOf(h.store, 'google', 'g-unv')).toEqual({ email: e1, emailVerified: false });
+        profile.emailVerified = true;
+        const again = await flow(linker, 'google');
+        expect(again.headers.get('location')).toBe(`${FRONT}/signin?error=suspended`);
+        expect(setCookie(again, '__Host-ventrical_session')).toBeUndefined();
+        expect(await identityOf(h.store, 'google', 'g-unv')).toEqual({ email: e1, emailVerified: false });
       } finally { await h.close?.(); }
     });
 
