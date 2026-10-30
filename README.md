@@ -86,6 +86,7 @@ app.get('/api/me', requireSession(auth), (req, res) => res.json({ id: req.user!.
 | `cookieNames` | `{ session?, oauth? }`, each overriding its default. Defaults: `__Host-ventrical_session` and `__Host-ventrical_oauth` when `publicUrl` is https and `cookieDomain` is unset (Secure, Path=/, no Domain); otherwise `ventrical_session` and `ventrical_oauth`. |
 | `cookieDomain` | Optional `Domain` attribute for both cookies. Setting it switches the default cookie names back to the plain ones. An explicit `cookieNames` value that starts with `__Host-` is always Secure with `Path=/` and no `Domain`, ignoring `cookieDomain`. |
 | `sessionTtlMs` | Session life, default 30 days. |
+| `sessionMaxAgeMs` | Absolute cap on a session's life, counted from its creation, default 90 days. Refresh never extends a session beyond it, and a session past it is signed out and deleted. Positive, finite. A custom store must return `createdAt` from `getSessionWithExpiry` for the cap to apply to its sessions. |
 | `onErrorTimeoutMs` | Longest wait for `hooks.onError` before responding anyway, default 2000. Positive, finite, at most 2147483647 (the `setTimeout` maximum). |
 | `clock` | Optional `() => Date`, for tests. |
 | `fetch` | Optional `fetch` used for discovery, the token endpoint, the JWKS and GitHub's API. |
@@ -243,8 +244,8 @@ Each app implements `AuthStore<Tx>` over its own database (or uses the Postgres 
 | `emailBelongsToSuspendedUser(email, tx?)` | Verified identity emails only, case-insensitive. **With a `tx` it must hold `FOR SHARE` (or an equivalent lock) on the matching user rows**, so a suspension cannot commit between the check and the end of the transaction. |
 | `createSessionUnlessSuspended(userId, idHash, expiresAt, identity, tx)` | Holds the user row `FOR SHARE`; inserts the session and returns `true`, or returns `false` when the user is suspended. |
 | `getSessionWithExpiry(idHash, now)` | The session's user and expiry, excluding suspended users. Also `verifiedEmail`: the email of the identity the session was created with when that identity is verified, else `null`. |
-| `touchSession(idHash, expiresAt)`, `deleteSession(idHash)`, `deleteSessionsForUser(userId, tx?)` | As named; `deleteSessionsForUser` returns the number deleted. |
-| `purgeExpiredSessions(now)` | **Required.** Deletes every session with `expires_at <= now` and returns how many were removed. Custom `AuthStore` implementers must add it. |
+| `touchSession(idHash, expiresAt)`, `deleteSession(idHash, tx?)`, `deleteSessionsForUser(userId, tx?)` | As named; `deleteSessionsForUser` returns the number deleted. With a `tx`, `deleteSession` commits or rolls back with it (the sign-in transaction uses this to drop the previous session). |
+| `purgeExpiredSessions(now, opts?)` | **Required.** Deletes every session with `expires_at <= now` and returns how many were removed. With `opts.maxAgeMs` it also deletes sessions with `created_at + maxAgeMs <= now`. Custom `AuthStore` implementers must add it. |
 | `updateIdentity?(provider, subject, update, tx?)` | Optional. Updates the stored `email` and `emailVerified` of an existing identity (`email` undefined leaves it unchanged, null clears it; a no-op when the identity does not exist). The handler calls it inside the sign-in transaction on a returning sign-in, so the stored identity email stays current. Without it the stored email is not refreshed. |
 | `isSuspendedCredential?(idHash, now)` | Optional, read-only. Lets `requireSession` answer `account_suspended` instead of `unauthenticated`. |
 
@@ -296,7 +297,7 @@ for (const file of readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).
 
 ## Operational notes
 
-- **Suspending a user:** set `users.suspended_at` and leave their session rows in place. If you delete the sessions, a suspended person's old cookie no longer matches anything and the `403 account_suspended` answer degrades to `401 unauthenticated`.
+- **Suspending a user:** set `users.suspended_at`. Their sessions are only hidden while suspended, not deleted, so they **reappear when you un-suspend** the user. Your app MUST therefore call `store.deleteSessionsForUser(userId)` when it suspends someone, unless it deliberately wants old sessions to come back on un-suspend. Trade-off: once the sessions are deleted, a suspended person's old cookie matches nothing and the `403 account_suspended` answer degrades to `401 unauthenticated`.
 - **Non-browser clients:** the logout POSTs require an `Origin` or `Referer` header from a trusted origin (see above). Scripts and mobile clients must send one.
 - **Expired sessions are not purged automatically.** Expired rows are ignored but stay in the table; see [Security notes](#security-notes) for `store.purgeExpiredSessions`.
 
@@ -306,11 +307,11 @@ Keep your own data in your own tables keyed by user id, not as extra columns on 
 
 - **Rate limiting:** the package does no rate limiting at all. `/auth/*` must be rate limited by your application (a reverse proxy or middleware in front of the auth routes).
 - **`cookieDomain` weakens cookie isolation.** Setting it gives up the `__Host-` protection against cookie tossing (a sibling subdomain can set or overwrite the cookies) and exposes the session cookie to every subdomain of that domain. Leave it unset unless you need to share the cookie across subdomains you fully trust.
-- **Purge expired sessions on a schedule.** `store.purgeExpiredSessions(now: Date): Promise<number>` deletes every session with `expires_at <= now` and returns how many rows were removed. `pgAuthStore` supports it, and it is a required method of `AuthStore`, so custom stores must implement it. Example:
+- **Purge expired sessions on a schedule.** `store.purgeExpiredSessions(now: Date, opts?: { maxAgeMs?: number }): Promise<number>` deletes every session with `expires_at <= now` and returns how many rows were removed. Pass `{ maxAgeMs }` (the same value as `sessionMaxAgeMs`, default 90 days) to also delete sessions older than the cap by `created_at`. `pgAuthStore` supports it, and it is a required method of `AuthStore`, so custom stores must implement it. Example:
 
   ```ts
   setInterval(() => {
-    store.purgeExpiredSessions(new Date()).then(
+    store.purgeExpiredSessions(new Date(), { maxAgeMs: 90 * 24 * 60 * 60 * 1000 }).then(
       (n) => console.log(`purged ${n} expired sessions`),
       () => { /* log and try again next time */ },
     );
