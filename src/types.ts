@@ -140,8 +140,9 @@ export interface AuthHooks<Tx = unknown> {
   onError?(event: AuthErrorEvent): void | Promise<void>;
   canCreateAccount?(profile: ProviderProfile & { provider: ProviderName }): Promise<CanCreateResult>;
   /**
-   * Runs inside the sign-in transaction. It may run twice if a duplicate-identity race
-   * retries the transaction, so side effects must be done through `tx`.
+   * Runs inside the sign-in transaction, after the session row has been written (a suspended person is refused
+   * before this is called). If it throws, the transaction rolls back, session included. It may run twice if a
+   * duplicate-identity race retries the transaction, so side effects must be done through `tx`.
    */
   afterSignIn?(ctx: {
     user: AuthUser;

@@ -124,7 +124,7 @@ describe('refreshing the stored identity email on sign-in', () => {
     expect(updates).toEqual([]);
   });
 
-  it('runs in the sign-in transaction before afterSignIn and the session insert, and the user passed on has no identity field', async () => {
+  it('runs in the sign-in transaction before afterSignIn, and the user passed on has no identity field', async () => {
     const { store, updates, txs } = spyStore();
     const seen: { tx: MemoryTx; user: unknown; storedAtHook: unknown }[] = [];
     const p = prof('g1', { email: 'old@example.test' });

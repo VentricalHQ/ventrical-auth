@@ -288,7 +288,7 @@ describe('GET /auth/:provider/callback', () => {
     await flow(auth, 'google');
     expect(calls.map((c) => c.isNew)).toEqual([true, false]);
     expect(calls.map((c) => c.provider)).toEqual(['google', 'google']);
-    expect(calls.map((c) => c.sessionsAtCall)).toEqual([0, 1]);
+    expect(calls.map((c) => c.sessionsAtCall)).toEqual([1, 2]);
     expect(txSeen[0]).toBeDefined();
     expect(txSeen[0]).toBe(calls[0]!.tx);
     expect(txSeen[1]).toBe(calls[0]!.tx);

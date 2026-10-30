@@ -284,8 +284,6 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
         user = await config.store.createUserWithIdentity({ ...identity, ...(profile.name !== undefined ? { name: profile.name } : {}) }, tx);
         isNew = true;
       }
-      // Also runs for a returning user who is suspended: createSessionUnlessSuspended then refuses and its tx writes roll back.
-      await config.hooks?.afterSignIn?.({ user, profile, provider: provider.name, isNew, tx });
       // The request's old session (a valid one that is not the new one) goes with this sign-in: same tx, so a suspended
       // refusal below rolls the delete back and the person keeps it. Not done on the link path.
       if (current) {
@@ -294,6 +292,9 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
       }
       const ok = await config.store.createSessionUnlessSuspended(user.id, idHash, expiresAt, { provider: provider.name, subject: profile.subject }, tx);
       if (!ok) throw new SuspendedSignal();
+      // After the session row exists, so a suspended person never reaches the hook's non-transaction side effects. If the
+      // hook throws, the whole tx (user, session, old-session delete) rolls back.
+      await config.hooks?.afterSignIn?.({ user, profile, provider: provider.name, isNew, tx });
     });
     try {
       try {
