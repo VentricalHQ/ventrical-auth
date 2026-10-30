@@ -81,13 +81,13 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
   async function report(stage: string, code: string, provider?: ProviderName, err?: unknown): Promise<void> {
     const hook = config.hooks?.onError;
     if (!hook) return;
-    const errorName = err === undefined ? undefined : nameOf(err);
-    const event: AuthErrorEvent = {
-      stage, code,
-      ...(provider !== undefined ? { provider } : {}),
-      ...(errorName !== undefined ? { errorName } : {}),
-    };
     try {
+      const errorName = err === undefined ? undefined : nameOf(err);
+      const event: AuthErrorEvent = {
+        stage, code,
+        ...(provider !== undefined ? { provider } : {}),
+        ...(errorName !== undefined ? { errorName } : {}),
+      };
       await hook.call(config.hooks, event);
     } catch {
       // Swallowed: the package logs nothing.

@@ -169,6 +169,58 @@ describe('hooks.onError events', () => {
     ]);
   });
 
+  it('logout-everywhere for a suspended user is account_suspended', async () => {
+    const { auth, store, events } = setup({ google: prof('g1') });
+    const sess = await signedIn(auth, 'google');
+    store.suspend((await store.findUserByIdentity('google', 'g1'))!.id);
+    const res = (await auth.handle(req('POST', '/auth/logout-everywhere', { origin: FRONT, cookie: sess })))!;
+    expect(res.status).toBe(403);
+    expect(events).toEqual([{ stage: 'logout', code: 'account_suspended', errorName: 'AuthHttpError' }]);
+  });
+
+  it('logout store errors are internal_error (deleteSession and deleteSessionsForUser)', async () => {
+    const store = createMemoryStore();
+    const badDelete = Object.assign(Object.create(store) as typeof store, { deleteSession: async () => { throw new EvalError('db'); } });
+    const a = setup({ google: prof('g1') }, { store: badDelete });
+    const res = (await a.auth.handle(req('POST', '/auth/logout', { origin: FRONT, cookie: 'ventrical_session=x' })))!;
+    expect(res.status).toBe(500);
+    expect(a.events).toEqual([{ stage: 'logout', code: 'internal_error', errorName: 'EvalError' }]);
+
+    const badAll = Object.assign(Object.create(store) as typeof store, { deleteSessionsForUser: async () => { throw new RangeError('db'); } });
+    const b = setup({ google: prof('g1') }, { store: badAll });
+    const sess = await signedIn(b.auth, 'google');
+    b.events.length = 0;
+    const res2 = (await b.auth.handle(req('POST', '/auth/logout-everywhere', { origin: FRONT, cookie: sess })))!;
+    expect(res2.status).toBe(500);
+    expect(b.events).toEqual([{ stage: 'logout', code: 'internal_error', errorName: 'RangeError' }]);
+  });
+
+  it('a duplicate-identity failure with no owner on retry is sign_in_failed', async () => {
+    const store = createMemoryStore();
+    let finds = 0;
+    const dup = Object.assign(Object.create(store) as typeof store, {
+      findUserByIdentity: async () => { finds++; return undefined; },
+      createUserWithIdentity: async () => { throw new DuplicateIdentityError(); },
+    });
+    const { auth, events } = setup({ google: prof('g1') }, { store: dup });
+    const res = await flow(auth, 'google');
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toBe(`${FRONT}/signin?error=sign_in_failed`);
+    expect(finds).toBe(2);
+    expect(events).toEqual([{ stage: 'callback', code: 'sign_in_failed', provider: 'google', errorName: 'DuplicateIdentityError' }]);
+  });
+
+  it('an error whose class name cannot be read still yields the normal response', async () => {
+    const hostile = new Proxy({}, { get() { throw new Error('nope'); } });
+    const store = createMemoryStore();
+    const bad = Object.assign(Object.create(store) as typeof store, { deleteSession: async () => { throw hostile; } });
+    const { auth, events } = setup({ google: prof('g1') }, { store: bad });
+    const res = (await auth.handle(req('POST', '/auth/logout', { origin: FRONT, cookie: 'ventrical_session=x' })))!;
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: { code: 'internal_error', message: 'Internal error' } });
+    expect(events).toEqual([]);
+  });
+
   it('success paths and a provider-less 404 report nothing', async () => {
     const { auth, events } = setup({ google: prof('g1') });
     await flow(auth, 'google');
@@ -181,6 +233,8 @@ describe('a misbehaving onError hook changes nothing', () => {
   const scenarios: Array<[string, (over: Partial<AuthConfig<MemoryTx>>) => Promise<Response>]> = [
     ['invalid_state', async (o) => (await setup({ google: prof('g1') }, o).auth.handle(req('GET', '/auth/google/callback?code=c&state=nope')))!],
     ['sign_in_failed', async (o) => flow(setup({ google: prof('g1') }, { ...o, hooks: { ...o.hooks, afterSignIn: async () => { throw new Error('x'); } } }).auth, 'google')],
+    ['logout forbidden', async (o) => (await setup({ google: prof('g1') }, o).auth.handle(req('POST', '/auth/logout')))!],
+    ['start provider_disabled', async (o) => (await setup({ google: prof('g1') }, o).auth.handle(req('GET', '/auth/microsoft/start')))!],
     ['internal_error', async (o) => flow(setup({ google: prof('g1') }, { ...o, hooks: { ...o.hooks, canCreateAccount: async () => { throw new Error('x'); } } }).auth, 'google')],
   ];
   const variants: Array<[string, () => unknown]> = [

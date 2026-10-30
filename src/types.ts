@@ -66,6 +66,10 @@ export type CanCreateResult = { allow: true } | { allow: false; reason: string }
  * code: an AuthHttpError code (invalid_state, oauth_error, provider_disabled, forbidden, unauthenticated, account_suspended),
  *   'exchange_failed' (code exchange or ID-token verification threw), 'suspended', 'sign_in_failed', 'identity_in_use',
  *   'link_failed', 'internal_error' (unexpected throw), or the canCreateAccount deny reason.
+ *   A canCreateAccount reason is also placed in the sign-in redirect URL (?error=), so it must be a short code and
+ *   must not embed PII (no emails, names or ids).
+ * 'request' is the fallback stage for a failure that happens before the route is recognised (for example a
+ *   malformed request URL).
  */
 export interface AuthErrorEvent {
   stage: string;
@@ -76,7 +80,10 @@ export interface AuthErrorEvent {
 }
 
 export interface AuthHooks<Tx = unknown> {
-  /** Observes failures. A throwing or rejecting hook is swallowed and never changes the response. */
+  /**
+   * Observes failures. A throwing or rejecting hook is swallowed and never changes the response.
+   * It is awaited before the response is returned, so keep it fast (hand slow work off, do not block on it).
+   */
   onError?(event: AuthErrorEvent): void | Promise<void>;
   canCreateAccount?(profile: ProviderProfile & { provider: ProviderName }): Promise<CanCreateResult>;
   /**
