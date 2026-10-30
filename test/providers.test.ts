@@ -389,6 +389,36 @@ describe('ID token signature verification (JWKS)', () => {
         await expect(exchange()).rejects.toThrow(SIGNATURE_MSG);
         expect(idp.jwksCalls()).toBe(2);
       });
+      it('concurrent logins with an unknown kid share ONE JWKS fetch', async () => {
+        const { idp, claims, exchange } = await t.setup();
+        await idp.sign(claims, { kid: 'nope' });
+        const results = await Promise.allSettled([exchange(), exchange(), exchange()]);
+        expect(results.map((r) => r.status)).toEqual(['rejected', 'rejected', 'rejected']);
+        for (const r of results) expect((r as PromiseRejectedResult).reason.message).toMatch(SIGNATURE_MSG);
+        expect(idp.jwksCalls()).toBe(1);
+      });
+      it('concurrent cold-cache logins share ONE JWKS fetch and all succeed', async () => {
+        const { idp, claims, exchange } = await t.setup();
+        await idp.sign(claims);
+        await Promise.all([exchange(), exchange()]);
+        expect(idp.jwksCalls()).toBe(1);
+      });
+      it('a concurrent rotation refetch is shared, and a failed shared fetch does not poison later retries', async () => {
+        const { idp, claims, exchange } = await t.setup();
+        await idp.sign(claims);
+        await exchange();
+        const rotated = makeKey({ kid: 'k2' });
+        await idp.sign(claims, { key: rotated });
+        idp.jwks.networkError = true;
+        const failed = await Promise.allSettled([exchange(), exchange()]);
+        expect(failed.map((r) => r.status)).toEqual(['rejected', 'rejected']);
+        for (const r of failed) expect((r as PromiseRejectedResult).reason.message).toMatch(SIGNATURE_MSG);
+        expect(idp.jwksCalls()).toBe(2); // 1 initial + exactly 1 shared failed refetch
+        idp.jwks.networkError = false;
+        idp.jwks.keys = [idp.mainKey.jwk, rotated.jwk];
+        await expect(exchange()).resolves.toBeDefined();
+        expect(idp.jwksCalls()).toBe(3);
+      });
       it('does not cache a failed fetch', async () => {
         const { idp, claims, exchange } = await t.setup();
         await idp.sign(claims);

@@ -101,12 +101,13 @@ const rsaBits = (n: string): number => {
  * openid-client 6 validates the ID token's claims (iss, aud, exp, nonce, ...) but does not check its signature,
  * as OIDC Core 3.1.3.7 lets a client skip that for tokens received straight from the token endpoint. We verify it anyway
  * against the issuer's discovered jwks_uri: RS256 only, key >= 2048 bits, kid required, JWKS cached 5 minutes per URI,
- * one refetch on an unknown kid, then fail closed. Errors never carry the token, key material or response bodies.
+ * one refetch on an unknown kid (concurrent lookups share a single in-flight fetch), then fail closed. Errors never carry the token, key material or response bodies.
  */
 function jwksVerifier(fetchFn: typeof fetch, now: () => number): (idToken: string, jwksUri: string | undefined) => Promise<void> {
   const cache = new Map<string, { keys: Jwk[]; at: number }>();
   const fail = (): never => { throw new Error(SIG_FAIL); };
-  const load = async (uri: string): Promise<Jwk[]> => {
+  const inflight = new Map<string, Promise<Jwk[]>>();
+  const fetchKeys = async (uri: string): Promise<Jwk[]> => {
     let keys: Jwk[];
     try {
       const res = await fetchFn(uri, { signal: AbortSignal.timeout(JWKS_TIMEOUT_MS) });
@@ -117,6 +118,14 @@ function jwksVerifier(fetchFn: typeof fetch, now: () => number): (idToken: strin
     } catch { return fail(); }
     cache.set(uri, { keys, at: now() });
     return keys;
+  };
+  /** Concurrent callers (cold cache or an unknown kid) share one fetch; the slot is freed on success and on failure. */
+  const load = (uri: string): Promise<Jwk[]> => {
+    const running = inflight.get(uri);
+    if (running) return running;
+    const p = fetchKeys(uri).finally(() => { inflight.delete(uri); });
+    inflight.set(uri, p);
+    return p;
   };
   return async (idToken, jwksUri) => {
     const parts = idToken.split('.');
