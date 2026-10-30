@@ -2,6 +2,7 @@
 import type { NextFunction, Request as ExpressRequest, RequestHandler, Response as ExpressResponse } from 'express';
 import type { Auth } from '../index.js';
 import { AuthHttpError } from '../errors.js';
+import type { SessionResult } from '../session.js';
 import type { AuthUser } from '../types.js';
 
 declare module 'express-serve-static-core' {
@@ -75,5 +76,21 @@ export function requireSession(auth: Auth): RequestHandler {
       req.user = session.user;
       next();
     })().catch((err: unknown) => next(err instanceof AuthHttpError ? err : new Error('Auth session check failed')));
+  };
+}
+
+/**
+ * Optional-session helper for routes that serve both signed-in and anonymous callers. Resolves the session (setting
+ * `req.user` and, when `res` is given, appending a refreshed session cookie) or `undefined` when there is none.
+ * An anonymous caller is not an error; only unexpected store failures reject.
+ */
+export function currentSession(auth: Auth): (req: ExpressRequest, res?: ExpressResponse) => Promise<SessionResult | undefined> {
+  return async (req, res) => {
+    if (!isPathTarget(req)) return undefined;
+    const session = await auth.getSession(toRequest(req, auth.publicUrl));
+    if (!session) return undefined;
+    if (session.setCookie && res) res.append('set-cookie', session.setCookie);
+    req.user = session.user;
+    return session;
   };
 }

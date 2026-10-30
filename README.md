@@ -32,7 +32,7 @@ Entry points:
 | Import | Contents |
 | --- | --- |
 | `@ventrical/auth` | `createAuth`, the types, `AuthHttpError`, `DuplicateIdentityError`, `SUSPENDED_MESSAGE` |
-| `@ventrical/auth/express` | `authRouter`, `requireSession`, `req.user` typing |
+| `@ventrical/auth/express` | `authRouter`, `requireSession`, `currentSession`, `req.user` typing |
 | `@ventrical/auth/pg` | `pgAuthStore`, `migrationsDir` |
 
 ## Quick start (Express and Postgres)
@@ -101,17 +101,18 @@ Routes served by `handle` (and so by `authRouter`):
 `createAuth` returns `{ publicUrl, handle, getSession, requireSession }`:
 
 - `handle(request: Request): Promise<Response | undefined>` serves the auth routes. It returns `undefined` for any path it does not own, **and also for the wrong method on an owned path** (for example `POST /auth/providers`), so the host application decides what a 404 or 405 looks like.
-- `getSession(request)` returns `{ user, id, setCookie? }` or `undefined`. This is the `currentSession` of the design spec, exposed as `auth.getSession`. When `setCookie` is present the session was refreshed and the caller must send it as `Set-Cookie`.
+- `getSession(request)` returns `{ user, id, setCookie? }` or `undefined`. When `setCookie` is present the session was refreshed and the caller must send it as `Set-Cookie`.
 - `requireSession(request)` is like `getSession` but throws `AuthHttpError` (`401 unauthenticated`, or `403 account_suspended` when the cookie belongs to a currently suspended user).
 
 The core never touches Express's `req` or `res`. Cookies are read from the `Cookie` header and written as `Set-Cookie` headers on the `Response`; redirects are `Response` objects with a `Location` header.
 
 ### Express adapter
 
-`@ventrical/auth/express` has exactly two exports (plus the `req.user` type augmentation); there is no `currentSession` in the adapter, use `auth.getSession` on the core:
+`@ventrical/auth/express` has three exports (plus the `req.user` type augmentation):
 
 - `authRouter(auth)`: an Express request handler for every auth route. Unknown paths and wrong methods fall through to `next()`. Request targets that are not origin-form paths (absolute-form, `*`) are never treated as auth routes. Unexpected errors go to `next()` with a fixed message, never the original detail.
 - `requireSession(auth)`: middleware that sets `req.user`, appends a refreshed session cookie when needed, and passes an `AuthHttpError` to `next()` on failure (`401`, or `403` for a suspended account; the same non-path targets get `401`). Map it to a response in your error handler.
+- `currentSession(auth)`: returns `async (req, res?) => SessionResult | undefined` for routes that serve signed-in and anonymous callers alike. It sets `req.user` when there is a session, appends a refreshed cookie to `res` when one is passed, and resolves `undefined` (never rejects) for an anonymous caller. Only unexpected store failures reject.
 
 ## POST routes and the Origin check
 

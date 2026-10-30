@@ -4,7 +4,7 @@ import net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createAuth, AuthHttpError, type ProviderName, type ProviderProfile } from '../src/index.js';
-import { authRouter, requireSession } from '../src/express/index.js';
+import { authRouter, currentSession, requireSession } from '../src/express/index.js';
 import { newSessionId } from '../src/session.js';
 import { fakeProvider } from './helpers/fake-provider.js';
 import { createMemoryStore, type MemoryTx } from './helpers/memory-store.js';
@@ -207,5 +207,44 @@ describe('express adapter', () => {
     expect(await raw('http://evil.example.test/me', 'GET')).toMatch(/^HTTP\/1.1 401/);
     expect(await raw('*', 'OPTIONS')).toMatch(/^HTTP\/1.1 401/);
     expect(ran).toBe(0);
+  });
+  it('currentSession resolves the session or undefined, sets req.user, and never rejects an anonymous caller', async () => {
+    const { auth, store } = setup();
+    const base = await listen((app, a) => {
+      const current = currentSession(a);
+      app.get('/who', async (req, res, next) => {
+        try {
+          const s = await current(req, res);
+          res.json({ id: s?.user.id ?? null, reqUser: req.user?.id ?? null });
+        } catch (e) { next(e); }
+      });
+    }, auth);
+    const anon = await get(`${base}/who`);
+    expect(anon.status).toBe(200);
+    expect(await anon.json()).toEqual({ id: null, reqUser: null });
+    expect((await get(`${base}/who`, { cookie: 'ventrical_session=garbage' })).status).toBe(200);
+
+    const old = await seedSession(store, new Date(Date.now() + 10 * 864e5), 'g7');
+    const res = await get(`${base}/who`, { cookie: `ventrical_session=${old.id}` });
+    const body = await res.json() as { id: string; reqUser: string };
+    expect(body.id).toBe(body.reqUser);
+    expect(body.id).toBeTruthy();
+    expect(cookieOf(res, 'ventrical_session')).toBe(`ventrical_session=${old.id}`); // refreshed cookie forwarded
+  });
+
+  it('currentSession returns undefined for absolute-form targets without building a URL', async () => {
+    const base = await listen((app, a) => {
+      const current = currentSession({ ...a, getSession: async () => { throw new Error('must not be called'); } });
+      app.use(async (req, res) => { res.status((await current(req, res)) === undefined ? 418 : 200).end(); });
+    });
+    const port = Number(new URL(base).port);
+    const out = await new Promise<string>((resolve, reject) => {
+      const sock = net.connect(port, '127.0.0.1', () => sock.write('GET http://evil.example.test/x HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n'));
+      let o = '';
+      sock.on('data', (d) => { o += d.toString(); });
+      sock.on('end', () => resolve(o));
+      sock.on('error', reject);
+    });
+    expect(out).toMatch(/^HTTP\/1.1 418/);
   });
 });
