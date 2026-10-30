@@ -84,38 +84,70 @@ export function cachedDiscovery(issuer: string, clientId: string, clientSecret: 
   };
 }
 
+const JWKS_TTL_MS = 5 * 60 * 1000;
+const JWKS_TIMEOUT_MS = 5000;
+const MIN_RSA_BITS = 2048;
+type Jwk = { kty?: unknown; kid?: unknown; use?: unknown; alg?: unknown; n?: unknown; e?: unknown };
+const SIG_FAIL = 'id token signature verification failed';
+
+const rsaBits = (n: string): number => {
+  const b = Buffer.from(n, 'base64url');
+  let i = 0;
+  while (i < b.length && b[i] === 0) i++;
+  return i === b.length ? 0 : (b.length - i - 1) * 8 + (32 - Math.clz32(b[i]!));
+};
+
 /**
  * openid-client 6 validates the ID token's claims (iss, aud, exp, nonce, ...) but does not check its signature,
  * as OIDC Core 3.1.3.7 lets a client skip that for tokens received straight from the token endpoint. We verify it anyway
- * against the issuer's published JWKS (RS256 only, which Google and Entra use; any other alg, including none, is rejected).
+ * against the issuer's discovered jwks_uri: RS256 only, key >= 2048 bits, kid required, JWKS cached 5 minutes per URI,
+ * one refetch on an unknown kid, then fail closed. Errors never carry the token, key material or response bodies.
  */
-async function verifyIdTokenSignature(idToken: string, jwksUri: string | undefined, fetchFn: typeof fetch): Promise<void> {
-  const fail = (): never => { throw new Error('id token signature verification failed'); };
-  const parts = idToken.split('.');
-  if (parts.length !== 3 || !jwksUri) return fail();
-  let header: { alg?: unknown; kid?: unknown };
-  try { header = JSON.parse(Buffer.from(parts[0]!, 'base64url').toString('utf8')) as typeof header; } catch { return fail(); }
-  if (header.alg !== 'RS256') return fail();
-  const res = await fetchFn(jwksUri);
-  if (!res.ok) return fail();
-  const { keys } = (await res.json()) as { keys?: Array<JsonWebKey & { kid?: string; use?: string }> };
-  const candidates = (Array.isArray(keys) ? keys : []).filter(
-    (k) => k.kty === 'RSA' && (k.use === undefined || k.use === 'sig') && (header.kid === undefined || k.kid === header.kid),
-  );
-  const sig = Buffer.from(parts[2]!, 'base64url');
-  const data = Buffer.from(`${parts[0]}.${parts[1]}`);
-  for (const jwk of candidates) {
+function jwksVerifier(fetchFn: typeof fetch, now: () => number): (idToken: string, jwksUri: string | undefined) => Promise<void> {
+  const cache = new Map<string, { keys: Jwk[]; at: number }>();
+  const fail = (): never => { throw new Error(SIG_FAIL); };
+  const load = async (uri: string): Promise<Jwk[]> => {
+    let keys: Jwk[];
     try {
-      if (verify('RSA-SHA256', data, createPublicKey({ key: jwk, format: 'jwk' }), sig)) return;
-    } catch { /* try the next key */ }
-  }
-  return fail();
+      const res = await fetchFn(uri, { signal: AbortSignal.timeout(JWKS_TIMEOUT_MS) });
+      if (!res.ok) return fail();
+      const body = (await res.json()) as { keys?: unknown };
+      if (!body || !Array.isArray(body.keys) || !body.keys.every((k) => typeof k === 'object' && k !== null)) return fail();
+      keys = body.keys as Jwk[];
+    } catch { return fail(); }
+    cache.set(uri, { keys, at: now() });
+    return keys;
+  };
+  return async (idToken, jwksUri) => {
+    const parts = idToken.split('.');
+    if (parts.length !== 3 || !jwksUri) return fail();
+    let header: { alg?: unknown; kid?: unknown };
+    try { header = JSON.parse(Buffer.from(parts[0]!, 'base64url').toString('utf8')) as typeof header; } catch { return fail(); }
+    if (header.alg !== 'RS256' || typeof header.kid !== 'string' || header.kid === '') return fail();
+    const kid = header.kid;
+    const find = (keys: Jwk[]) => keys.find((k) => k.kid === kid);
+    const hit = cache.get(jwksUri);
+    const fresh = hit !== undefined && now() - hit.at < JWKS_TTL_MS;
+    let jwk = fresh ? find(hit.keys) : undefined;
+    if (!jwk) {
+      jwk = find(await load(jwksUri));
+      // A cached set that lacked the kid has now been refetched once; a freshly loaded one is not refetched again.
+    }
+    if (!jwk) return fail();
+    if (jwk.kty !== 'RSA' || (jwk.use !== undefined && jwk.use !== 'sig') || (jwk.alg !== undefined && jwk.alg !== 'RS256')) return fail();
+    if (typeof jwk.n !== 'string' || typeof jwk.e !== 'string' || rsaBits(jwk.n) < MIN_RSA_BITS) return fail();
+    try {
+      const ok = verify('RSA-SHA256', Buffer.from(`${parts[0]}.${parts[1]}`), createPublicKey({ key: jwk as JsonWebKey, format: 'jwk' }), Buffer.from(parts[2]!, 'base64url'));
+      if (!ok) return fail();
+    } catch { return fail(); }
+  };
 }
 
 function oidcProvider(o: {
   name: 'google' | 'microsoft'; issuer: string; clientId: string; clientSecret: string; scopes: string[];
-  redirectUri: string; toProfile: (c: Claims) => ProviderProfile; fetchFn: typeof fetch | undefined;
+  redirectUri: string; toProfile: (c: Claims) => ProviderProfile; fetchFn: typeof fetch | undefined; now: () => number;
 }): AuthProvider {
+  const verifyIdToken = jwksVerifier(o.fetchFn ?? fetch, o.now);
   const config = cachedDiscovery(o.issuer, o.clientId, o.clientSecret, o.fetchFn);
   return {
     name: o.name,
@@ -128,14 +160,14 @@ function oidcProvider(o: {
       cb.searchParams.set('code', code);
       cb.searchParams.set('state', ctx.state);
       if (ctx.iss) cb.searchParams.set('iss', ctx.iss);
-      // openid-client verifies state, nonce, signature, iss (incl. the Entra {tenantid} template vs the token's tid) and aud.
+      // openid-client verifies state, nonce, iss (incl. the Entra {tenantid} template vs the token's tid) and aud (not the signature: see jwksVerifier).
       // It also requires the callback's own iss parameter (RFC 9207) when discovery advertises it, as Google does, and checks it equals the issuer.
       const tokens = await oidc.authorizationCodeGrant(await config(), cb, {
         pkceCodeVerifier: verifier, expectedState: ctx.state, expectedNonce: ctx.nonce, idTokenExpected: true,
       });
       const claims = tokens.claims();
       if (!claims || !tokens.id_token) throw new Error('no id token');
-      await verifyIdTokenSignature(tokens.id_token, (await config()).serverMetadata().jwks_uri, o.fetchFn ?? fetch);
+      await verifyIdToken(tokens.id_token, (await config()).serverMetadata().jwks_uri);
       return o.toProfile(claims as unknown as Claims);
     },
   };
@@ -146,10 +178,11 @@ export const PROVIDER_ORDER: readonly ProviderName[] = ['google', 'github', 'mic
 
 /** Builds only the providers whose credentials are configured. */
 export function createProviders(opts: {
-  providers: AuthConfig['providers']; publicUrl: string; fetch?: typeof fetch; userAgent?: string;
+  providers: AuthConfig['providers']; publicUrl: string; fetch?: typeof fetch; userAgent?: string; clock?: () => Date;
 }): Partial<Record<ProviderName, AuthProvider>> {
   const fetchFn = opts.fetch;
   const doFetch = fetchFn ?? fetch;
+  const now = (): number => (opts.clock ? opts.clock().getTime() : Date.now());
   const userAgent = opts.userAgent ?? 'ventrical-auth';
   const redirect = (n: string) => `${opts.publicUrl.replace(/\/+$/, '')}/auth/${n}/callback`;
   const { google, microsoft, github } = opts.providers;
@@ -158,7 +191,7 @@ export function createProviders(opts: {
     out.google = oidcProvider({
       name: 'google', issuer: 'https://accounts.google.com', clientId: google.clientId,
       clientSecret: google.clientSecret, scopes: ['openid', 'email', 'profile'],
-      redirectUri: redirect('google'), toProfile: googleProfile, fetchFn,
+      redirectUri: redirect('google'), toProfile: googleProfile, fetchFn, now,
     });
   }
   if (microsoft) {
@@ -166,7 +199,7 @@ export function createProviders(opts: {
       name: 'microsoft', issuer: `https://login.microsoftonline.com/${microsoft.tenant}/v2.0`,
       clientId: microsoft.clientId, clientSecret: microsoft.clientSecret,
       scopes: ['openid', 'email', 'profile', 'offline_access'],
-      redirectUri: redirect('microsoft'), toProfile: microsoftProfile, fetchFn,
+      redirectUri: redirect('microsoft'), toProfile: microsoftProfile, fetchFn, now,
     });
   }
   if (github) {

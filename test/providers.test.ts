@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createProviders, fetchGithubProfile, googleProfile, issOf, microsoftProfile, PROVIDER_ORDER } from '../src/providers.js';
-import { fakeIdp, type SignOptions } from './helpers/fake-fetch.js';
+import { fakeIdp, makeKey, type SignOptions } from './helpers/fake-fetch.js';
 
 const providers = {
   google: { clientId: 'gid', clientSecret: 'gs' },
@@ -8,7 +8,7 @@ const providers = {
   github: { clientId: 'ghid', clientSecret: 'ghs' },
 };
 const publicUrl = 'https://api.example.com';
-const mk = (f?: typeof fetch, over: Partial<typeof providers> = {}, extra: { userAgent?: string; publicUrl?: string } = {}) =>
+const mk = (f?: typeof fetch, over: Partial<typeof providers> = {}, extra: { userAgent?: string; publicUrl?: string; clock?: () => Date } = {}) =>
   createProviders({ providers: { ...providers, ...over }, publicUrl, ...(f ? { fetch: f } : {}), ...extra });
 
 const VERIFIER = 'verifier-verifier-verifier-verifier-verifier';
@@ -274,24 +274,143 @@ describe('RFC 9207 duplicate iss', () => {
   });
 });
 
-describe('ID token signature and lifetime failures', () => {
+describe('ID token signature verification (JWKS)', () => {
   const MS_ISS = 'https://login.microsoftonline.com/tid1/v2.0';
-  const cases: Array<[string, SignOptions]> = [
-    ['signed with a different key', { wrongKey: true }],
-    ['payload tampered after signing', { tamper: true }],
-    ['alg none', { alg: 'none' }],
-    ['expired', { expired: true }],
+  const SIGNATURE_MSG = /signature|key|token/i;
+  const ALG_MSG = /invalid response|signature|key|token|alg/i; // openid-client may reject the header first
+  const MARKER = 'PLANTED-MARKER-9f3a';
+  type Idp = Awaited<ReturnType<typeof fakeIdp>>;
+  type Target = { label: string; setup: () => Promise<{ idp: Idp; exchange: () => Promise<unknown>; claims: Record<string, unknown>; mkp: (clock?: () => Date) => { exchange: () => Promise<unknown> } }> };
+  const targets: Target[] = [
+    {
+      label: 'google',
+      setup: async () => {
+        const idp = await fakeIdp(G_ISSUER, `${G_ISSUER}/.well-known/openid-configuration`);
+        const claims = { iss: G_ISSUER, aud: 'gid', sub: 'g1', nonce: 'nn' };
+        const mkp = (clock?: () => Date) => { const p = mk(idp.fetchFn, {}, clock ? { clock } : {}).google!; return { exchange: () => p.exchange('c', VERIFIER, ctx) }; };
+        return { idp, claims, mkp, exchange: mkp().exchange };
+      },
+    },
+    {
+      label: 'microsoft (tenant issuer)',
+      setup: async () => {
+        const idp = await fakeIdp(MS_ISSUER, MS_DISCOVERY);
+        const claims = { iss: MS_ISS, tid: 'tid1', aud: 'mid', sub: 'm1', nonce: 'nn' };
+        const mkp = (clock?: () => Date) => { const p = mk(idp.fetchFn, {}, clock ? { clock } : {}).microsoft!; return { exchange: () => p.exchange('c', VERIFIER, ctx) }; };
+        return { idp, claims, mkp, exchange: mkp().exchange };
+      },
+    },
   ];
-  for (const [label, opts] of cases) {
-    it(`google rejects a token ${label}`, async () => {
-      const idp = await fakeIdp(G_ISSUER, `${G_ISSUER}/.well-known/openid-configuration`);
-      await idp.sign({ iss: G_ISSUER, aud: 'gid', sub: 'g1', nonce: 'nn' }, opts);
-      await expect(mk(idp.fetchFn).google!.exchange('c', VERIFIER, ctx)).rejects.toThrow();
-    });
-    it(`microsoft rejects a token ${label}`, async () => {
-      const idp = await fakeIdp(MS_ISSUER, MS_DISCOVERY);
-      await idp.sign({ iss: MS_ISS, tid: 'tid1', aud: 'mid', sub: 'm1', nonce: 'nn' }, opts);
-      await expect(mk(idp.fetchFn).microsoft!.exchange('c', VERIFIER, ctx)).rejects.toThrow();
+
+  for (const t of targets) {
+    describe(t.label, () => {
+      const rejects = async (opts: SignOptions, msg = SIGNATURE_MSG, prep?: (idp: Idp) => void) => {
+        const { idp, claims, exchange } = await t.setup();
+        prep?.(idp);
+        await idp.sign(claims, opts);
+        const err = (await exchange().then(() => undefined, (e: unknown) => e)) as Error;
+        expect(err).toBeInstanceOf(Error);
+        expect(err.message).toMatch(msg);
+        expect(err.message).not.toContain(idp.lastToken());
+        expect(err.message).not.toContain(MARKER);
+        expect(err.message).not.toMatch(/"n"|"kty"|BEGIN/);
+      };
+
+      it('accepts a validly signed token', async () => {
+        const { idp, claims, exchange } = await t.setup();
+        await idp.sign(claims);
+        await expect(exchange()).resolves.toMatchObject({ emailVerified: false });
+      });
+      it('rejects a signature from a different key', () => rejects({ wrongKey: true }));
+      it('rejects a payload tampered after signing', () => rejects({ tamper: true }));
+      it('rejects an unknown kid after exactly one refetch', async () => {
+        const { idp, claims, exchange } = await t.setup();
+        await idp.sign(claims, { kid: 'nope' });
+        await expect(exchange()).rejects.toThrow(SIGNATURE_MSG);
+        expect(idp.jwksCalls()).toBe(1);
+      });
+      it('rejects when the JWKS fetch fails on the network', () => rejects({}, SIGNATURE_MSG, (i) => { i.jwks.networkError = true; }));
+      it('rejects when the JWKS fetch is non-OK', () => rejects({}, SIGNATURE_MSG, (i) => { i.jwks.status = 500; i.jwks.body = MARKER; }));
+      it('rejects a non-JSON JWKS without leaking the body or a SyntaxError', () => rejects({}, SIGNATURE_MSG, (i) => { i.jwks.body = `<html>${MARKER}</html>`; }));
+      it('rejects a JWKS of the wrong shape', async () => {
+        await rejects({}, SIGNATURE_MSG, (i) => { i.jwks.body = JSON.stringify({ keys: 'x', marker: MARKER }); });
+        await rejects({}, SIGNATURE_MSG, (i) => { i.jwks.body = JSON.stringify({ keys: [1, 'a'], marker: MARKER }); });
+        await rejects({}, SIGNATURE_MSG, (i) => { i.jwks.body = JSON.stringify([MARKER]); });
+        await rejects({}, SIGNATURE_MSG, (i) => { i.jwks.body = 'null'; });
+      });
+      it('rejects alg none', () => rejects({ alg: 'none' }, ALG_MSG));
+      it('rejects HS256 signed with the public key as the HMAC secret', () => rejects({ alg: 'HS256' }, ALG_MSG));
+      it('rejects an RS384 header', () => rejects({ alg: 'RS384' }, ALG_MSG));
+      it('rejects an expired token', () => rejects({ expired: true }, /./));
+      it('rejects a JWK that declares alg RS384', async () => {
+        const k = makeKey({ kid: 'k1', jwkAlg: 'RS384' });
+        await rejects({ key: k }, SIGNATURE_MSG, (i) => { i.jwks.keys = [k.jwk]; });
+      });
+      it('rejects a JWK with the wrong use or kty', async () => {
+        const k = makeKey({ kid: 'k1', use: 'enc' });
+        await rejects({ key: k }, SIGNATURE_MSG, (i) => { i.jwks.keys = [k.jwk]; });
+        const k2 = makeKey({ kid: 'k1' });
+        await rejects({ key: k2 }, SIGNATURE_MSG, (i) => { i.jwks.keys = [{ ...k2.jwk, kty: 'EC' }]; });
+      });
+      it('rejects a key under 2048 bits', async () => {
+        const k = makeKey({ kid: 'k1', bits: 1024 });
+        await rejects({ key: k }, SIGNATURE_MSG, (i) => { i.jwks.keys = [k.jwk]; });
+      });
+      it('accepts a JWK without alg', async () => {
+        const { idp, claims, exchange } = await t.setup();
+        const k = makeKey({ kid: 'k1', jwkAlg: null });
+        idp.jwks.keys = [k.jwk];
+        await idp.sign(claims, { key: k });
+        await expect(exchange()).resolves.toBeDefined();
+      });
+      it('caches the JWKS: two logins make one JWKS fetch', async () => {
+        const { idp, claims, exchange } = await t.setup();
+        await idp.sign(claims);
+        await exchange();
+        await exchange();
+        expect(idp.jwksCalls()).toBe(1);
+      });
+      it('refetches once on an unknown kid and succeeds when the new JWKS has it', async () => {
+        const { idp, claims, exchange } = await t.setup();
+        await idp.sign(claims);
+        await exchange();
+        expect(idp.jwksCalls()).toBe(1);
+        const rotated = makeKey({ kid: 'k2' });
+        idp.jwks.keys = [idp.mainKey.jwk, rotated.jwk];
+        await idp.sign(claims, { key: rotated });
+        await expect(exchange()).resolves.toBeDefined();
+        expect(idp.jwksCalls()).toBe(2);
+      });
+      it('refetches once on an unknown kid and fails when the new JWKS still lacks it', async () => {
+        const { idp, claims, exchange } = await t.setup();
+        await idp.sign(claims);
+        await exchange();
+        await idp.sign(claims, { kid: 'ghost' });
+        await expect(exchange()).rejects.toThrow(SIGNATURE_MSG);
+        expect(idp.jwksCalls()).toBe(2);
+      });
+      it('does not cache a failed fetch', async () => {
+        const { idp, claims, exchange } = await t.setup();
+        await idp.sign(claims);
+        idp.jwks.networkError = true;
+        await expect(exchange()).rejects.toThrow(SIGNATURE_MSG);
+        idp.jwks.networkError = false;
+        await expect(exchange()).resolves.toBeDefined();
+        expect(idp.jwksCalls()).toBe(2);
+      });
+      it('expires the cache after the 5 minute TTL', async () => {
+        const { idp, claims, mkp } = await t.setup();
+        let t0 = Date.now();
+        const p = mkp(() => new Date(t0));
+        await idp.sign(claims);
+        await p.exchange();
+        t0 += 4 * 60_000;
+        await p.exchange();
+        expect(idp.jwksCalls()).toBe(1);
+        t0 += 2 * 60_000;
+        await p.exchange();
+        expect(idp.jwksCalls()).toBe(2);
+      });
     });
   }
 });
