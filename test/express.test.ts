@@ -1,5 +1,6 @@
 import express from 'express';
 import type { Server } from 'node:http';
+import net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createAuth, AuthHttpError, type ProviderName, type ProviderProfile } from '../src/index.js';
@@ -136,5 +137,57 @@ describe('express adapter', () => {
     const res = await get(`${base}/auth/providers`);
     expect(res.status).toBe(500);
     expect(await res.text()).not.toContain('secret-detail');
+  });
+
+  async function seedSession(store: ReturnType<typeof setup>['store'], expiresAt: Date, subject = 'g5') {
+    const user = await store.createUserWithIdentity({ provider: 'google', subject, emailVerified: true });
+    const { newSessionId } = await import('../src/session.js');
+    const sid = newSessionId();
+    await store.transaction((tx) => store.createSessionUnlessSuspended(user.id, sid.idHash, expiresAt, { provider: 'google', subject }, tx));
+    return sid;
+  }
+
+  it('logout over HTTP with a missing or wrong Origin is 403 and the session survives', async () => {
+    const { auth, store } = setup();
+    const base = await listen((app, a) => app.use(authRouter(a)), auth);
+    const sid = await seedSession(store, new Date(Date.now() + 864e5));
+    const cookie = `ventrical_session=${sid.id}`;
+    expect((await fetch(`${base}/auth/logout`, { method: 'POST', headers: { cookie } })).status).toBe(403);
+    expect((await fetch(`${base}/auth/logout`, { method: 'POST', headers: { cookie, origin: 'https://evil.example.test' } })).status).toBe(403);
+    expect(store.sessions.size).toBe(1);
+  });
+
+  it('requireSession returns the refreshed Set-Cookie when the session is under 29 days from expiry', async () => {
+    const { auth, store } = setup();
+    const base = await listen((app, a) => {
+      app.get('/me', requireSession(a), (req, res) => { res.json({ id: req.user!.id }); });
+    }, auth);
+    const old = await seedSession(store, new Date(Date.now() + 10 * 864e5));
+    const res = await get(`${base}/me`, { cookie: `ventrical_session=${old.id}` });
+    expect(res.status).toBe(200);
+    expect(cookieOf(res, 'ventrical_session')).toBe(`ventrical_session=${old.id}`);
+    const fresh = await seedSession(store, new Date(Date.now() + 30 * 864e5 - 1000), 'g6');
+    const res2 = await get(`${base}/me`, { cookie: `ventrical_session=${fresh.id}` });
+    expect(res2.status).toBe(200);
+    expect(cookieOf(res2, 'ventrical_session')).toBeUndefined();
+  });
+
+  it('absolute-form and asterisk request targets call next() instead of building a URL', async () => {
+    const seen: string[] = [];
+    const base = await listen((app, a) => {
+      app.use(authRouter({ ...a, handle: async (r) => { seen.push(r.url); return a.handle(r); } }));
+      app.use((_req, res) => { res.status(418).end(); });
+    });
+    const port = Number(new URL(base).port);
+    const raw = (target: string, method: string) => new Promise<string>((resolve, reject) => {
+      const sock = net.connect(port, '127.0.0.1', () => sock.write(`${method} ${target} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n`));
+      let out = '';
+      sock.on('data', (d) => { out += d.toString(); });
+      sock.on('end', () => resolve(out));
+      sock.on('error', reject);
+    });
+    expect(await raw('http://evil.example.test/auth/providers', 'GET')).toMatch(/^HTTP\/1.1 418/);
+    expect(await raw('*', 'OPTIONS')).toMatch(/^HTTP\/1.1 418/);
+    expect(seen).toEqual([]);
   });
 });

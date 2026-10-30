@@ -10,6 +10,9 @@ declare module 'express-serve-static-core' {
   }
 }
 
+/** Request targets that are not origin-form paths (absolute-form, `*`) are never auth routes. */
+const isPathTarget = (req: ExpressRequest): boolean => req.originalUrl.startsWith('/');
+
 function toRequest(req: ExpressRequest, publicUrl: string): Request {
   // Origin comes from config, never the Host header. originalUrl keeps the mount path of nested routers.
   const url = new URL(new URL(publicUrl).origin + req.originalUrl);
@@ -28,12 +31,18 @@ function toRequest(req: ExpressRequest, publicUrl: string): Request {
  */
 export function authRouter(auth: Auth): RequestHandler {
   return (req: ExpressRequest, res: ExpressResponse, next: NextFunction): void => {
+    if (!isPathTarget(req)) {
+      next();
+      return;
+    }
     void (async () => {
       const response = await auth.handle(toRequest(req, auth.publicUrl));
       if (response === undefined) {
         next();
         return;
       }
+      // Buffer first, so a failure while reading the body cannot leave a half-written response.
+      const body = Buffer.from(await response.arrayBuffer());
       res.statusCode = response.status;
       const cookies = response.headers.getSetCookie();
       for (const [name, value] of response.headers) {
@@ -41,8 +50,12 @@ export function authRouter(auth: Auth): RequestHandler {
         res.setHeader(name, value);
       }
       if (cookies.length > 0) res.setHeader('set-cookie', cookies);
-      res.end(Buffer.from(await response.arrayBuffer()));
+      res.end(body);
     })().catch((err: unknown) => {
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
       // Details of unexpected errors may carry secrets; hand next() a fixed error.
       next(err instanceof AuthHttpError ? err : new Error('Auth handler failed'));
     });
@@ -52,6 +65,10 @@ export function authRouter(auth: Auth): RequestHandler {
 /** Middleware that requires a valid session, sets `req.user`, and passes `AuthHttpError` to `next`. */
 export function requireSession(auth: Auth): RequestHandler {
   return (req: ExpressRequest, res: ExpressResponse, next: NextFunction): void => {
+    if (!isPathTarget(req)) {
+      next(new AuthHttpError(401, 'unauthenticated', 'Sign in required'));
+      return;
+    }
     void (async () => {
       const session = await auth.requireSession(toRequest(req, auth.publicUrl));
       if (session.setCookie) res.append('set-cookie', session.setCookie);
