@@ -13,7 +13,7 @@ Requirements: Node 22 or newer, ESM only. `openid-client` is pinned to exactly 6
 - Authorization-code flow with PKCE (S256), `state` and `nonce` for Google and Microsoft. GitHub has no PKCE or ID token; its `state` is checked.
 - Verifies the ID token's `iss` (including Entra's `{tenantid}` template), `aud`, `exp` and `nonce`, requires the callback's own `iss` parameter (RFC 9207) when the provider advertises it, and verifies the token's signature (see [ID-token signature check](#id-token-signature-check)).
 - Email counts as verified only when the provider proves it: Google's `email_verified`; Microsoft only when `xms_edov` is true on the `email` claim (`preferred_username` is never verified); GitHub only for the primary verified email.
-- Emails are stored trimmed and lowercased (identity and user rows); an email that is empty after trimming counts as no email. A custom store must apply the same rule in `createUserWithIdentity`, `linkIdentity`, `updateIdentity` and `emailBelongsToSuspendedUser`. Rows written before this version are not rewritten: matching is case-insensitive for them, but legacy rows with surrounding whitespace are not matched.
+- Emails are stored trimmed and lowercased (identity and user rows); an email that is empty after trimming counts as no email. The `canCreateAccount` and `afterSignIn` hooks receive the same normalised profile (lowercased, trimmed, and omitted when empty), not only the store. A custom store must apply the same rule in `createUserWithIdentity`, `linkIdentity`, `updateIdentity` and `emailBelongsToSuspendedUser`. Rows written before this version are not rewritten: matching is case-insensitive for them, but legacy rows with surrounding whitespace are not matched.
 - The OAuth state cookie is encrypted (AES-256-GCM, bound to its purpose), lives 10 minutes, and is cleared on every callback outcome.
 - Accounts are never linked by email. Linking happens only inside the session that started the flow (bound at `/start`).
 - Every sign-in (new or returning) with a verified email is refused with `suspended` when that email belongs to another, suspended user, and so is linking such an email. Two people who share one verified mailbox are therefore treated as one person: suspending one blocks the other from signing in. Suspend each account you want locked out, and call `deleteSessionsForUser` for each suspended user.
@@ -242,7 +242,7 @@ Each app implements `AuthStore<Tx>` over its own database (or uses the Postgres 
 | `findUserByIdentity(provider, subject, tx?)` | The user owning that identity, or `undefined`. |
 | `createUserWithIdentity(profile, tx?)` | Creates both. Must throw **`DuplicateIdentityError`** when `(provider, subject)` already exists. |
 | `linkIdentity(userId, identity, tx?)` | Adds an identity to a user; also throws `DuplicateIdentityError` on a duplicate. |
-| `emailBelongsToSuspendedUser(email, tx?, opts?)` | Verified identity emails only; the argument is trimmed and lowercased before comparing. `opts.exceptUserId` excludes that user's own rows (the sign-in passes the returning user's id). **With a `tx` it must hold `FOR SHARE` (or an equivalent lock) on the matching user rows**, so a suspension cannot commit between the check and the end of the transaction. |
+| `emailBelongsToSuspendedUser(email, tx?, opts?)` | Verified identity emails only; the argument is trimmed and lowercased before comparing. `opts.exceptUserId` excludes that user's own rows, so the check does not lock them (the sign-in passes the returning user's id). It does not exempt a suspended user from being refused: their own sign-in is still refused because `createSessionUnlessSuspended` returns false. **With a `tx` it must hold `FOR SHARE` (or an equivalent lock) on the matching user rows**, so a suspension cannot commit between the check and the end of the transaction. |
 | `createSessionUnlessSuspended(userId, idHash, expiresAt, identity, tx)` | Holds the user row `FOR SHARE`; inserts the session and returns `true`, or returns `false` when the user is suspended. |
 | `getSessionWithExpiry(idHash, now)` | The session's user and expiry, excluding suspended users. Also `verifiedEmail`: the email of the identity the session was created with when that identity is verified and still belongs to the session's user, else `null`. |
 | `touchSession(idHash, expiresAt)`, `deleteSession(idHash, tx?)`, `deleteSessionsForUser(userId, tx?)` | As named; `deleteSessionsForUser` returns the number deleted. With a `tx`, `deleteSession` commits or rolls back with it (the sign-in transaction uses this to drop the previous session). A custom store's `deleteSession` must accept the optional `tx` and run in it: otherwise the old-session delete runs outside the sign-in transaction, and a suspended rollback would still delete the old session. |
@@ -261,9 +261,17 @@ import { storeContract } from './store-contract.js';
 
 storeContract('my store', async () => {
   const store = createMyStore();
-  return { store, suspend: async (userId) => { /* mark the user suspended */ }, close: async () => { /* optional teardown */ } };
+  return {
+    store,
+    suspend: async (userId) => { /* mark the user suspended */ },
+    setCreatedAt: async (idHash, createdAt) => { /* backdate the session's created_at */ },
+    moveIdentity: async (provider, subject, toUserId) => { /* reassign the identity to another user */ },
+    close: async () => { /* optional teardown */ },
+  };
 });
 ```
+
+`setCreatedAt` and `moveIdentity` are test-only helpers the contract suite uses (the store stamps `created_at` itself on insert, and no store method reassigns an identity); they are not part of `AuthStore`. `close` is optional.
 
 `test/memory-store.test.ts` (in-memory store) and `test/pg/pg-store.test.ts` (Postgres) are the two examples.
 
@@ -321,6 +329,8 @@ Keep your own data in your own tables keyed by user id, not as extra columns on 
   ```
 
   A cron job or a scheduled task that calls the same method works equally well.
+- **A suspended session past its absolute cap returns 403, not 401.** `requireSession` answers `403 account_suspended` for a session whose user is suspended even when the session is also past `sessionMaxAgeMs` (for example after lowering `sessionMaxAgeMs`), because the suspended check runs before the cap check and the row is not deleted on that path. The row is only removed by `purgeExpiredSessions`.
+- **A refresh never shortens a session.** A session issued with a longer life keeps its stored expiry when refreshed (for example after `sessionTtlMs` is lowered); the refresh only ever extends it, and `sessionMaxAgeMs` still bounds it.
 - **Keep `hooks.onError` fast.** It is awaited before the response is returned, bounded by `onErrorTimeoutMs` (default 2000 ms, at most 2147483647). Hand slow work off instead of blocking on it.
 - **Same-site deployment only.** The frontend and the API must share a registrable domain (use `cookieDomain` to share the cookie with sibling subdomains). The `Origin`/`Referer` check on POST routes trusts `frontendUrl` and `publicUrl`. See [Same-site deployment only](#same-site-deployment-only) and [POST routes and the Origin check](#post-routes-and-the-origin-check).
 - **ID-token signature check:** RS256 only, JWKS cached for 5 minutes, one refetch on an unknown `kid` (concurrent lookups share a single in-flight fetch), and it fails closed. Details in [ID-token signature check](#id-token-signature-check).

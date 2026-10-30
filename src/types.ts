@@ -48,8 +48,8 @@ export interface AuthStore<Tx = unknown> {
   /**
    * Verified identity emails only; the argument is trimmed and lowercased before comparing. When given a tx it must hold FOR SHARE (or an equivalent lock)
    * on the matching user rows, so a suspension cannot slip in before the transaction commits.
-   * With `opts.exceptUserId`, that user's own rows are ignored (a user is never blocked by their own suspension
-   * here); the other matching rows are still locked.
+   * With `opts.exceptUserId`, that user's own rows are not locked or counted by this check; the other matching rows
+   * are still locked. It does not let a suspended user in: their own sign-in is refused because createSessionUnlessSuspended returns false.
    */
   emailBelongsToSuspendedUser(email: string, tx?: Tx, opts?: { exceptUserId?: string }): Promise<boolean>;
   /** Holds the user row FOR SHARE; returns false when the user is suspended. */
