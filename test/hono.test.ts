@@ -11,12 +11,12 @@ describe('hono adapter', () => {
     app.use(authHandler(auth));
     const start = await app.request('/auth/google/start');
     expect(start.status).toBe(302);
-    const oauth = cookieNamed(start.headers.getSetCookie(), 'ventrical_oauth')!;
+    const oauth = cookieNamed(start.headers.getSetCookie(), '__Host-ventrical_oauth')!;
     const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
     const cb = await app.request(`/auth/google/callback?code=fake-code&state=${encodeURIComponent(state)}`, { headers: { cookie: oauth } });
     expect(cb.status).toBe(302);
     expect(cb.headers.get('location')!.startsWith(FRONT)).toBe(true);
-    const session = cookieNamed(cb.headers.getSetCookie(), 'ventrical_session')!;
+    const session = cookieNamed(cb.headers.getSetCookie(), '__Host-ventrical_session')!;
     expect(store.sessions.size).toBe(1);
 
     expect((await app.request('/auth/logout', { method: 'POST', headers: { cookie: session } })).status).toBe(403);
@@ -25,7 +25,7 @@ describe('hono adapter', () => {
     const out = await app.request('/auth/logout', { method: 'POST', headers: { cookie: session, origin: FRONT } });
     expect(out.status).toBe(204);
     expect(store.sessions.size).toBe(0);
-    expect(out.headers.getSetCookie().some((c) => /^ventrical_session=;/.test(c))).toBe(true);
+    expect(out.headers.getSetCookie().some((c) => /^__Host-ventrical_session=;/.test(c))).toBe(true);
   });
 
   it('unowned paths fall through to the app', async () => {
@@ -73,17 +73,17 @@ describe('hono adapter', () => {
     expect(await anon.json()).toEqual({ error: { code: 'unauthenticated', message: 'Sign in required' } });
 
     const { user, sid } = await seedSession(store, new Date(Date.now() + 10 * 864e5));
-    const ok = await app.request('/me', { headers: { cookie: `ventrical_session=${sid.id}` } });
+    const ok = await app.request('/me', { headers: { cookie: `__Host-ventrical_session=${sid.id}` } });
     expect(ok.status).toBe(200);
     expect(await ok.json()).toEqual({ id: user.id });
-    expect(cookieNamed(ok.headers.getSetCookie(), 'ventrical_session')).toBe(`ventrical_session=${sid.id}`);
+    expect(cookieNamed(ok.headers.getSetCookie(), '__Host-ventrical_session')).toBe(`__Host-ventrical_session=${sid.id}`);
 
     const fresh = await seedSession(store, new Date(Date.now() + 30 * 864e5 - 1000), 'g6');
-    const ok2 = await app.request('/me', { headers: { cookie: `ventrical_session=${fresh.sid.id}` } });
-    expect(cookieNamed(ok2.headers.getSetCookie(), 'ventrical_session')).toBeUndefined();
+    const ok2 = await app.request('/me', { headers: { cookie: `__Host-ventrical_session=${fresh.sid.id}` } });
+    expect(cookieNamed(ok2.headers.getSetCookie(), '__Host-ventrical_session')).toBeUndefined();
 
     store.suspend(user.id);
-    const sus = await app.request('/me', { headers: { cookie: `ventrical_session=${sid.id}` } });
+    const sus = await app.request('/me', { headers: { cookie: `__Host-ventrical_session=${sid.id}` } });
     expect(sus.status).toBe(403);
     expect(await sus.json()).toEqual({ error: { code: 'account_suspended', message: SUSPENDED_MESSAGE } });
   });

@@ -38,7 +38,7 @@ type Auth = ReturnType<typeof setup>;
 
 async function flow(auth: Auth, provider: string, session?: string) {
   const start = (await auth.handle(req('GET', `/auth/${provider}/start`, session ? { cookie: session } : {})))!;
-  const oauth = `ventrical_oauth=${encodeURIComponent(setCookie(start, 'ventrical_oauth')!.value)}`;
+  const oauth = `__Host-ventrical_oauth=${encodeURIComponent(setCookie(start, '__Host-ventrical_oauth')!.value)}`;
   const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
   return (await auth.handle(req('GET', `/auth/${provider}/callback?code=c&state=${encodeURIComponent(state)}`, { cookie: [oauth, session].filter(Boolean).join('; ') })))!;
 }
@@ -78,7 +78,7 @@ describe('refreshing the stored identity email on sign-in', () => {
     expect(updates).toEqual([]);
     const second = await flow(auth, 'google'); // unchanged
     expect(updates).toEqual([]);
-    const session = `ventrical_session=${setCookie(second, 'ventrical_session')!.value}`;
+    const session = `__Host-ventrical_session=${setCookie(second, '__Host-ventrical_session')!.value}`;
     await flow(auth, 'github', session); // link flow: new identity attached, never refreshed
     expect(updates).toEqual([]);
     // Linking an identity whose provider email differs from nothing stored still does not refresh.
@@ -108,7 +108,7 @@ describe('refreshing the stored identity email on sign-in', () => {
     p.email = 'new@example.test';
     const res = await flow(auth, 'google');
     expect(res.headers.get('location')).toBe(`${FRONT}/`);
-    expect(setCookie(res, 'ventrical_session')).toBeDefined();
+    expect(setCookie(res, '__Host-ventrical_session')).toBeDefined();
   });
 
   it('a store that does not expose the stored identity does not refresh', async () => {
@@ -167,7 +167,7 @@ describe('refreshing the stored identity email on sign-in', () => {
     p.email = 'new@example.test';
     const res = await flow(auth, 'google');
     expect(res.headers.get('location')).toBe(`${FRONT}/signin?error=suspended`);
-    expect(setCookie(res, 'ventrical_session')).toBeUndefined();
+    expect(setCookie(res, '__Host-ventrical_session')).toBeUndefined();
     expect((await identityOf(store, 'google', 'g1'))!.email).toBe('old@example.test');
   });
 
@@ -189,7 +189,7 @@ describe('refreshing the stored identity email on sign-in', () => {
     const other = setup({ github: prof('h-old', { email: 'old@example.test' }) }, store);
     const allowed = await flow(other, 'github');
     expect(allowed.headers.get('location')).toBe(`${FRONT}/`);
-    expect(setCookie(allowed, 'ventrical_session')).toBeDefined();
+    expect(setCookie(allowed, '__Host-ventrical_session')).toBeDefined();
   });
 
   it('is idempotent when the duplicate-identity retry re-runs the transaction', async () => {

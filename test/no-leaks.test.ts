@@ -65,7 +65,7 @@ async function expectExchangeFailed(cb: Response, provider: string): Promise<voi
   expect(cb.status).toBe(400);
   expect(cb.headers.get('location')).toBeNull();
   expect(await cb.clone().json()).toEqual({ error: { code: 'oauth_error', message: 'Sign-in failed' } });
-  expect(setCookie(cb, 'ventrical_session')).toBeUndefined();
+  expect(setCookie(cb, '__Host-ventrical_session')).toBeUndefined();
   expect(errorEvents).toEqual([{ stage: 'callback', code: 'exchange_failed', provider, errorName: expect.any(String) }]);
   expect(Object.keys(errorEvents[0] as object).every((k) => EVENT_KEYS.includes(k))).toBe(true);
 }
@@ -74,7 +74,7 @@ async function expectExchangeFailed(cb: Response, provider: string): Promise<voi
 async function expectSigninRedirect(cb: Response, code: string, provider: string): Promise<void> {
   expect(cb.status).toBe(302);
   expect(cb.headers.get('location')).toBe(`${FRONT}/signin?error=${code}`);
-  expect(setCookie(cb, 'ventrical_session')).toBeUndefined();
+  expect(setCookie(cb, '__Host-ventrical_session')).toBeUndefined();
   expect(errorEvents).toEqual([expect.objectContaining({ stage: 'callback', code, provider })]);
 }
 
@@ -126,7 +126,7 @@ describe('planted secret never leaves (provider override)', () => {
   it('successful callback with a planted code', async () => {
     const { s, cb } = await run(ok());
     expect(cb.status).toBe(302);
-    expect(setCookie(cb, 'ventrical_session')).toBeDefined();
+    expect(setCookie(cb, '__Host-ventrical_session')).toBeDefined();
     await expectNoLeak('success', s.res, cb);
   });
 

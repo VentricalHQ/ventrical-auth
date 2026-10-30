@@ -25,12 +25,12 @@ type Auth = ReturnType<typeof setup>['auth'];
 
 async function flow(auth: Auth, provider: string, o: { session?: string; query?: string } = {}) {
   const start = (await auth.handle(req('GET', `/auth/${provider}/start`, o.session ? { cookie: o.session } : {})))!;
-  const oauth = `ventrical_oauth=${encodeURIComponent(setCookie(start, 'ventrical_oauth')!.value)}`;
+  const oauth = `__Host-ventrical_oauth=${encodeURIComponent(setCookie(start, '__Host-ventrical_oauth')!.value)}`;
   const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
   const path = `/auth/${provider}/callback?${(o.query ?? 'code=fake-code&state={state}').replace('{state}', encodeURIComponent(state))}`;
   return (await auth.handle(req('GET', path, { cookie: [oauth, o.session].filter(Boolean).join('; ') })))!;
 }
-const signedIn = async (auth: Auth, p: string) => `ventrical_session=${setCookie(await flow(auth, p), 'ventrical_session')!.value}`;
+const signedIn = async (auth: Auth, p: string) => `__Host-ventrical_session=${setCookie(await flow(auth, p), '__Host-ventrical_session')!.value}`;
 const snap = async (r: Response) => JSON.stringify([r.status, [...r.headers].filter(([k]) => k !== 'set-cookie'), r.headers.getSetCookie().map((c) => c.replace(/=[^;]*/, '=')), await r.clone().text()]);
 
 describe('hooks.onError events', () => {
@@ -154,7 +154,7 @@ describe('hooks.onError events', () => {
     const store = createMemoryStore();
     const bad = { ...store, getSessionWithExpiry: async () => { throw new TypeError('db'); } } as typeof store;
     const { auth, events } = setup({ google: prof('g1') }, { store: bad });
-    const res = (await auth.handle(req('GET', '/auth/google/start', { cookie: 'ventrical_session=x' })))!;
+    const res = (await auth.handle(req('GET', '/auth/google/start', { cookie: '__Host-ventrical_session=x' })))!;
     expect(res.status).toBe(500);
     expect(events).toEqual([{ stage: 'start', code: 'internal_error', provider: 'google', errorName: 'TypeError' }]);
   });
@@ -182,7 +182,7 @@ describe('hooks.onError events', () => {
     const store = createMemoryStore();
     const badDelete = Object.assign(Object.create(store) as typeof store, { deleteSession: async () => { throw new EvalError('db'); } });
     const a = setup({ google: prof('g1') }, { store: badDelete });
-    const res = (await a.auth.handle(req('POST', '/auth/logout', { origin: FRONT, cookie: 'ventrical_session=x' })))!;
+    const res = (await a.auth.handle(req('POST', '/auth/logout', { origin: FRONT, cookie: '__Host-ventrical_session=x' })))!;
     expect(res.status).toBe(500);
     expect(a.events).toEqual([{ stage: 'logout', code: 'internal_error', errorName: 'EvalError' }]);
 
@@ -215,7 +215,7 @@ describe('hooks.onError events', () => {
     const store = createMemoryStore();
     const bad = Object.assign(Object.create(store) as typeof store, { deleteSession: async () => { throw hostile; } });
     const { auth, events } = setup({ google: prof('g1') }, { store: bad });
-    const res = (await auth.handle(req('POST', '/auth/logout', { origin: FRONT, cookie: 'ventrical_session=x' })))!;
+    const res = (await auth.handle(req('POST', '/auth/logout', { origin: FRONT, cookie: '__Host-ventrical_session=x' })))!;
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: { code: 'internal_error', message: 'Internal error' } });
     expect(events).toEqual([]);

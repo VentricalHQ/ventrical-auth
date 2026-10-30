@@ -140,7 +140,12 @@ export interface AuthConfig<Tx = unknown> {
   encryptionKey: Buffer;
   store: AuthStore<Tx>;
   hooks?: AuthHooks<Tx>;
+  /**
+   * Per-name overrides. Defaults: `__Host-ventrical_session` / `__Host-ventrical_oauth` when publicUrl is https and
+   * cookieDomain is unset (Secure, Path=/, no Domain); otherwise `ventrical_session` / `ventrical_oauth`.
+   */
   cookieNames?: { session?: string; oauth?: string };
+  /** Setting it switches the default cookie names back to the plain ones (a __Host- cookie cannot carry a Domain). */
   cookieDomain?: string;
   sessionTtlMs?: number;
   /** Longest the handler waits for hooks.onError before responding anyway. Positive, finite; default 2000. */

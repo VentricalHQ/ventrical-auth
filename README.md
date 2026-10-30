@@ -81,9 +81,10 @@ app.get('/api/me', requireSession(auth), (req, res) => res.json({ id: req.user!.
 | `encryptionKey` | A 32-byte `Buffer`, used to encrypt the OAuth state cookie. |
 | `store` | An `AuthStore` (see below). |
 | `hooks` | Optional hooks, including `onError` (see [Hooks](#hooks)). |
-| `cookieNames` | `{ session?, oauth? }`, defaults `ventrical_session` and `ventrical_oauth`. |
+| `cookieNames` | `{ session?, oauth? }`, each overriding its default. Defaults: `__Host-ventrical_session` and `__Host-ventrical_oauth` when `publicUrl` is https and `cookieDomain` is unset (Secure, Path=/, no Domain); otherwise `ventrical_session` and `ventrical_oauth`. |
 | `cookieDomain` | Optional `Domain` attribute for both cookies. |
 | `sessionTtlMs` | Session life, default 30 days. |
+| `onErrorTimeoutMs` | Longest wait for `hooks.onError` before responding anyway, default 2000. Positive, finite. |
 | `clock` | Optional `() => Date`, for tests. |
 | `fetch` | Optional `fetch` used for discovery, the token endpoint, the JWKS and GitHub's API. |
 | `userAgent` | `User-Agent` for GitHub's API, default `ventrical-auth`. |
@@ -196,7 +197,7 @@ All hooks are optional. `Tx` is the transaction handle type of your store.
   - `stage`: `start`, `callback`, `link` (the callback when it completes an account link), `logout` (both logout routes), or `request` (a failure before the route is recognised, such as a malformed request URL).
   - `code`: see the table below. `provider` is set when the provider name is known. `errorName` is the error's class name, when an error was involved.
   - The event is built from a fixed whitelist. It **never carries** a message, stack, token, authorization code, JWKS, key material, response body, email or any other profile data, only the class name.
-  - A throwing or rejecting `onError` is swallowed and never changes the response. The hook is awaited before the response is returned, so keep it fast: hand slow work (network calls, queues) off instead of blocking on it.
+  - A throwing or rejecting `onError` is swallowed and never changes the response. The hook is awaited before the response is returned, for at most `onErrorTimeoutMs` (default 2000 ms), so keep it fast: hand slow work (network calls, queues) off instead of blocking on it.
   - Success paths report nothing, and so do unknown routes and providers (`not_found`), to keep probing out of your logs. Calling `getSession` or `requireSession` directly is not reported; the caller handles those errors.
 
   | Stage | Codes |

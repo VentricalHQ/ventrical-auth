@@ -27,8 +27,10 @@ export function parseCookies(header: string | null): Record<string, string> {
 
 function build(name: string, value: string, maxAgeSec: number, opts: CookieOptions, extra: string[] = []): string {
   const parts = [`${name}=${value}`, 'Path=/', `Max-Age=${Math.floor(maxAgeSec)}`, ...extra, 'HttpOnly', 'SameSite=Lax'];
-  if (opts.domain) parts.push(`Domain=${opts.domain}`);
-  if (opts.secure) parts.push('Secure');
+  // A __Host- cookie is only accepted with Secure, Path=/ and no Domain, so those are forced for it (set and clear alike).
+  const hostPrefixed = name.startsWith('__Host-');
+  if (opts.domain && !hostPrefixed) parts.push(`Domain=${opts.domain}`);
+  if (opts.secure || hostPrefixed) parts.push('Secure');
   return parts.join('; ');
 }
 

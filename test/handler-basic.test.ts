@@ -28,7 +28,7 @@ async function withSession(store: ReturnType<typeof createMemoryStore>, email = 
   const user = await store.createUserWithIdentity({ provider: 'github', subject: email, email, emailVerified: true });
   const { id, idHash } = newSessionId();
   await store.transaction((tx) => store.createSessionUnlessSuspended(user.id, idHash, new Date(Date.now() + 30 * 864e5), { provider: 'github', subject: email }, tx));
-  return { user, id, idHash, cookie: `ventrical_session=${id}` };
+  return { user, id, idHash, cookie: `__Host-ventrical_session=${id}` };
 }
 
 describe('GET /auth/providers', () => {
@@ -79,7 +79,7 @@ describe('GET /auth/:provider/start', () => {
     expect(res.status).toBe(302);
     const loc = new URL(res.headers.get('location')!);
     expect(loc.origin).toBe('https://idp.example.test');
-    const c = setCookie(res, 'ventrical_oauth')!;
+    const c = setCookie(res, '__Host-ventrical_oauth')!;
     expect(c.attrs['max-age']).toBe('600');
     expect(c.attrs.httponly).toBe(true);
     expect(c.attrs.secure).toBe(true);
@@ -98,30 +98,30 @@ describe('GET /auth/:provider/start', () => {
     const { auth } = setup({ cookieNames: { oauth: 'my_oauth' } });
     const res = (await auth.handle(req('GET', '/auth/google/start')))!;
     expect(setCookie(res, 'my_oauth')).toBeDefined();
-    expect(setCookie(res, 'ventrical_oauth')).toBeUndefined();
+    expect(setCookie(res, '__Host-ventrical_oauth')).toBeUndefined();
   });
 
   it('binds linkUserId when a session exists', async () => {
     const { auth, store } = setup();
     const s = await withSession(store);
     const res = (await auth.handle(req('GET', '/auth/google/start', { cookie: s.cookie })))!;
-    expect(openOAuthState(setCookie(res, 'ventrical_oauth')!.value, KEY)!.linkUserId).toBe(s.user.id);
+    expect(openOAuthState(setCookie(res, '__Host-ventrical_oauth')!.value, KEY)!.linkUserId).toBe(s.user.id);
   });
 
   it('does not bind linkUserId for an unknown session cookie', async () => {
     const { auth } = setup();
-    const res = (await auth.handle(req('GET', '/auth/google/start', { cookie: 'ventrical_session=nope' })))!;
-    expect(openOAuthState(setCookie(res, 'ventrical_oauth')!.value, KEY)!.linkUserId).toBeUndefined();
+    const res = (await auth.handle(req('GET', '/auth/google/start', { cookie: '__Host-ventrical_session=nope' })))!;
+    expect(openOAuthState(setCookie(res, '__Host-ventrical_oauth')!.value, KEY)!.linkUserId).toBeUndefined();
   });
 
   it('keeps only a safe redirect', async () => {
     const { auth } = setup();
     for (const bad of ['https://evil.test', '//evil.test', '/\\evil.test', 'relative']) {
       const res = (await auth.handle(req('GET', `/auth/google/start?redirect=${encodeURIComponent(bad)}`)))!;
-      expect(openOAuthState(setCookie(res, 'ventrical_oauth')!.value, KEY)!.redirect).toBe('/');
+      expect(openOAuthState(setCookie(res, '__Host-ventrical_oauth')!.value, KEY)!.redirect).toBe('/');
     }
     const ok = (await auth.handle(req('GET', '/auth/google/start?redirect=%2Fa%3Fb%3D1')))!;
-    expect(openOAuthState(setCookie(ok, 'ventrical_oauth')!.value, KEY)!.redirect).toBe('/a?b=1');
+    expect(openOAuthState(setCookie(ok, '__Host-ventrical_oauth')!.value, KEY)!.redirect).toBe('/a?b=1');
   });
 
   it('maps a provider failure to a generic 500 with no detail and no logging', async () => {
@@ -155,7 +155,7 @@ describe('POST /auth/logout', () => {
     const res = (await auth.handle(req('POST', '/auth/logout', { cookie: s.cookie, origin: FRONT })))!;
     expect(res.status).toBe(204);
     expect(store.sessions.has(s.idHash)).toBe(false);
-    const c = setCookie(res, 'ventrical_session')!;
+    const c = setCookie(res, '__Host-ventrical_session')!;
     expect(c.value).toBe('');
     expect(c.attrs['max-age']).toBe('0');
     expect(await auth.getSession(req('GET', '/', { cookie: s.cookie }))).toBeUndefined();
@@ -206,7 +206,7 @@ describe('POST /auth/logout-everywhere', () => {
     expect(store.sessions.has(s.idHash)).toBe(false);
     expect(store.sessions.has(second.idHash)).toBe(false);
     expect(store.sessions.has(other.idHash)).toBe(true);
-    expect(setCookie(res, 'ventrical_session')!.value).toBe('');
+    expect(setCookie(res, '__Host-ventrical_session')!.value).toBe('');
   });
 
   it('the memory store hands out a distinct tx per transaction', async () => {
@@ -285,9 +285,9 @@ describe('createAuth surface', () => {
     const user = await store.createUserWithIdentity({ provider: 'github', subject: 'q', emailVerified: true });
     const { id, idHash } = newSessionId();
     await store.transaction((tx) => store.createSessionUnlessSuspended(user.id, idHash, new Date(now.getTime() + 10 * 864e5), { provider: 'github', subject: 'q' }, tx));
-    const res = (await auth.handle(req('GET', '/auth/google/start', { cookie: `ventrical_session=${id}` })))!;
-    expect(setCookie(res, 'ventrical_session')!.value).toBe(id);
-    expect(cookieHeaderFrom(res)).toContain('ventrical_oauth=');
+    const res = (await auth.handle(req('GET', '/auth/google/start', { cookie: `__Host-ventrical_session=${id}` })))!;
+    expect(setCookie(res, '__Host-ventrical_session')!.value).toBe(id);
+    expect(cookieHeaderFrom(res)).toContain('__Host-ventrical_oauth=');
   });
 });
 
@@ -332,9 +332,9 @@ describe('path and scheme handling', () => {
   it('an upper-case HTTPS:// publicUrl still yields Secure cookies', async () => {
     const { auth } = setup({ publicUrl: 'HTTPS://api.example.test' });
     const res = (await auth.handle(req('GET', '/auth/google/start')))!;
-    expect(setCookie(res, 'ventrical_oauth')!.attrs.secure).toBe(true);
+    expect(setCookie(res, '__Host-ventrical_oauth')!.attrs.secure).toBe(true);
     const out = (await auth.handle(req('POST', '/auth/logout', { origin: FRONT })))!;
-    expect(setCookie(out, 'ventrical_session')!.attrs.secure).toBe(true);
+    expect(setCookie(out, '__Host-ventrical_session')!.attrs.secure).toBe(true);
   });
 
   it('an http publicUrl yields no Secure attribute', async () => {

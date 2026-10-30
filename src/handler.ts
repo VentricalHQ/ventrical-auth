@@ -12,6 +12,7 @@ import type { AuthConfig, AuthErrorEvent, AuthUser, ProviderName, ProviderProfil
 const DEFAULT_ON_ERROR_TIMEOUT_MS = 2000;
 
 export const DEFAULT_COOKIE_NAMES = { session: 'ventrical_session', oauth: 'ventrical_oauth' } as const;
+export const HOST_COOKIE_NAMES = { session: '__Host-ventrical_session', oauth: '__Host-ventrical_oauth' } as const;
 
 export interface Auth {
   /** The configured public base URL; adapters build request URLs from it, never from the Host header. */
@@ -49,7 +50,12 @@ class SuspendedSignal extends Error {}
 
 export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
   const clock = config.clock ?? (() => new Date());
-  const cookieNames = { ...DEFAULT_COOKIE_NAMES, ...config.cookieNames };
+  // __Host- names need https, Path=/ and no Domain, so they are the default only when cookieDomain is unset.
+  const defaults = new URL(config.publicUrl).protocol === 'https:' && !config.cookieDomain ? HOST_COOKIE_NAMES : DEFAULT_COOKIE_NAMES;
+  const cookieNames = {
+    session: config.cookieNames?.session ?? defaults.session,
+    oauth: config.cookieNames?.oauth ?? defaults.oauth,
+  };
   const sessions = makeSessions({
     store: config.store,
     cookieNames,

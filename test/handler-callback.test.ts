@@ -34,7 +34,7 @@ type Auth = ReturnType<typeof setup>['auth'];
 async function flow(auth: Auth, provider: string, o: { session?: string; startSession?: string; redirect?: string; query?: string } = {}) {
   const startSession = o.startSession ?? o.session;
   const start = (await auth.handle(req('GET', `/auth/${provider}/start${o.redirect ? `?redirect=${encodeURIComponent(o.redirect)}` : ''}`, startSession ? { cookie: startSession } : {})))!;
-  const oauthCookie = `ventrical_oauth=${encodeURIComponent(setCookie(start, 'ventrical_oauth')!.value)}`;
+  const oauthCookie = `__Host-ventrical_oauth=${encodeURIComponent(setCookie(start, '__Host-ventrical_oauth')!.value)}`;
   const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
   const cookie = [oauthCookie, o.session].filter(Boolean).join('; ');
   const path = `/auth/${provider}/callback?${(o.query ?? 'code=fake-code&state={state}').replace('{state}', encodeURIComponent(state))}`;
@@ -42,7 +42,7 @@ async function flow(auth: Auth, provider: string, o: { session?: string; startSe
   return { res, cookie, oauthCookie, state, path };
 }
 
-const sessionCookieOf = (res: Response) => setCookie(res, 'ventrical_session');
+const sessionCookieOf = (res: Response) => setCookie(res, '__Host-ventrical_session');
 const loc = (res: Response) => res.headers.get('location');
 const count = (store: MemoryStore) => store.sessions.size;
 
@@ -57,7 +57,7 @@ describe('GET /auth/:provider/callback', () => {
     expect(store.sessions.has(hashToken(sc.value))).toBe(true);
     const user = await store.findUserByIdentity('google', 'g1');
     expect(user).toMatchObject({ email: 'g1@example.test', name: 'Gee' });
-    const me = await auth.getSession(req('GET', '/x', { cookie: `ventrical_session=${sc.value}` }));
+    const me = await auth.getSession(req('GET', '/x', { cookie: `__Host-ventrical_session=${sc.value}` }));
     expect(me?.user.id).toBe(user!.id);
   });
 
@@ -79,13 +79,13 @@ describe('GET /auth/:provider/callback', () => {
     const a = (await store.findUserByIdentity('google', 'g1'))!;
     const b = (await store.findUserByIdentity('github', 'h1'))!;
     expect(b.id).not.toBe(a.id);
-    const me = await auth.getSession(req('GET', '/x', { cookie: `ventrical_session=${sessionCookieOf(res)!.value}` }));
+    const me = await auth.getSession(req('GET', '/x', { cookie: `__Host-ventrical_session=${sessionCookieOf(res)!.value}` }));
     expect(me!.user.id).toBe(b.id);
   });
 
   async function signedIn(auth: Auth, p: string) {
     const { res } = await flow(auth, p);
-    return `ventrical_session=${sessionCookieOf(res)!.value}`;
+    return `__Host-ventrical_session=${sessionCookieOf(res)!.value}`;
   }
 
   it('link works only in the session that started the flow', async () => {
@@ -114,11 +114,11 @@ describe('GET /auth/:provider/callback', () => {
     const sA = await signedIn(auth3, 'google');
     const start = (await auth3.handle(req('GET', '/auth/github/start', { cookie: sA })))!;
     const other = await store3.createUserWithIdentity({ provider: 'google', subject: 'gb', emailVerified: true });
-    const sessOther = `ventrical_session=sess-other`;
+    const sessOther = `__Host-ventrical_session=sess-other`;
     await store3.transaction((tx) => store3.createSessionUnlessSuspended(other.id, hashToken('sess-other'), new Date(Date.now() + 864e5), { provider: 'google', subject: 'gb' }, tx));
     const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
     const res3 = (await auth3.handle(req('GET', `/auth/github/callback?code=c&state=${state}`, {
-      cookie: `ventrical_oauth=${encodeURIComponent(setCookie(start, 'ventrical_oauth')!.value)}; ${sessOther}`,
+      cookie: `__Host-ventrical_oauth=${encodeURIComponent(setCookie(start, '__Host-ventrical_oauth')!.value)}; ${sessOther}`,
     })))!;
     const hx = (await store3.findUserByIdentity('github', 'hx'))!;
     const ga = (await store3.findUserByIdentity('google', 'ga'))!;
@@ -190,7 +190,7 @@ describe('GET /auth/:provider/callback', () => {
 
   it('a non-ASCII redirect on link ends with a percent-encoded Location', async () => {
     const { auth, store } = setup({ google: prof('g1'), github: prof('h1') });
-    const sess = `ventrical_session=${sessionCookieOf((await flow(auth, 'google')).res)!.value}`;
+    const sess = `__Host-ventrical_session=${sessionCookieOf((await flow(auth, 'google')).res)!.value}`;
     const { res } = await flow(auth, 'github', { session: sess, redirect: '/日本' });
     expect(res.status).toBe(302);
     expect(loc(res)).toBe(`${FRONT}/%E6%97%A5%E6%9C%AC`);
@@ -212,7 +212,7 @@ describe('GET /auth/:provider/callback', () => {
       linkIdentity: async () => { throw new DuplicateIdentityError(); },
     });
     const { auth } = setup({ google: prof('g1'), github: prof('h1') }, { store: dup });
-    const sess = `ventrical_session=${sessionCookieOf((await flow(auth, 'google')).res)!.value}`;
+    const sess = `__Host-ventrical_session=${sessionCookieOf((await flow(auth, 'google')).res)!.value}`;
     const { res } = await flow(auth, 'github', { session: sess });
     expect(loc(res)).toBe(`${FRONT}/settings?error=link_failed`);
   });
@@ -254,7 +254,7 @@ describe('GET /auth/:provider/callback', () => {
     expect(calls).toBe(1);
     await flow(auth, 'google');
     expect(calls).toBe(1);
-    await flow(auth, 'github', { session: `ventrical_session=${sessionCookieOf(res)!.value}` });
+    await flow(auth, 'github', { session: `__Host-ventrical_session=${sessionCookieOf(res)!.value}` });
     expect(calls).toBe(1);
   });
 
@@ -320,7 +320,7 @@ describe('GET /auth/:provider/callback', () => {
     const { auth, store } = setup({ google: prof('g1') });
     const first = await flow(auth, 'google');
     expect(first.res.status).toBe(302);
-    const cleared = setCookie(first.res, 'ventrical_oauth')!;
+    const cleared = setCookie(first.res, '__Host-ventrical_oauth')!;
     expect(cleared.value).toBe('');
     expect(cleared.attrs['max-age']).toBe('0');
     // Proves: the state cookie is cleared with Max-Age=0, and a callback arriving without it fails with invalid_state.
@@ -338,10 +338,10 @@ describe('GET /auth/:provider/callback', () => {
     const { auth, store } = setup({ google: prof('g1') });
     const start = (await auth.handle(req('GET', '/auth/google/start')))!;
     const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
-    const v = setCookie(start, 'ventrical_oauth')!.value;
+    const v = setCookie(start, '__Host-ventrical_oauth')!.value;
     const flipped = v.slice(0, -2) + (v.endsWith('A') ? 'B' : 'A') + v.slice(-1);
     for (const bad of [flipped, 'garbage', v.slice(0, 10)]) {
-      const res = (await auth.handle(req('GET', `/auth/google/callback?code=c&state=${state}`, { cookie: `ventrical_oauth=${encodeURIComponent(bad)}` })))!;
+      const res = (await auth.handle(req('GET', `/auth/google/callback?code=c&state=${state}`, { cookie: `__Host-ventrical_oauth=${encodeURIComponent(bad)}` })))!;
       expect(res.status).toBe(400);
       expect((await res.json() as any).error.code).toBe('invalid_state');
     }
@@ -351,24 +351,24 @@ describe('GET /auth/:provider/callback', () => {
   it('the state cookie is cleared on every response path', async () => {
     const { auth } = setup({ google: prof('g1') });
     const bad = (await auth.handle(req('GET', '/auth/google/callback?code=c&state=nope')))!;
-    expect(setCookie(bad, 'ventrical_oauth')!.attrs['max-age']).toBe('0');
+    expect(setCookie(bad, '__Host-ventrical_oauth')!.attrs['max-age']).toBe('0');
     const unknown = (await auth.handle(req('GET', '/auth/nope/callback?code=c&state=nope')))!;
     expect(unknown.status).toBe(404);
-    expect(setCookie(unknown, 'ventrical_oauth')!.attrs['max-age']).toBe('0');
+    expect(setCookie(unknown, '__Host-ventrical_oauth')!.attrs['max-age']).toBe('0');
     const denied = await flow(auth, 'google', { query: 'error=access_denied&error_description=leak&state={state}' });
     expect(denied.res.status).toBe(400);
     expect((await denied.res.json() as any).error.code).toBe('oauth_error');
-    expect(setCookie(denied.res, 'ventrical_oauth')!.attrs['max-age']).toBe('0');
+    expect(setCookie(denied.res, '__Host-ventrical_oauth')!.attrs['max-age']).toBe('0');
     const noCode = await flow(auth, 'google', { query: 'state={state}' });
     expect(noCode.res.status).toBe(400);
     expect((await noCode.res.json() as any).error.code).toBe('oauth_error');
-    expect(setCookie(noCode.res, 'ventrical_oauth')!.attrs['max-age']).toBe('0');
+    expect(setCookie(noCode.res, '__Host-ventrical_oauth')!.attrs['max-age']).toBe('0');
     const failed = setup({ google: new Error('x') });
     const f = await flow(failed.auth, 'google');
-    expect(setCookie(f.res, 'ventrical_oauth')!.attrs['max-age']).toBe('0');
+    expect(setCookie(f.res, '__Host-ventrical_oauth')!.attrs['max-age']).toBe('0');
     const rollback = setup({ google: prof('g1') }, { hooks: { afterSignIn: async () => { throw new Error('x'); } } });
     const r = await flow(rollback.auth, 'google');
-    expect(setCookie(r.res, 'ventrical_oauth')!.attrs['max-age']).toBe('0');
+    expect(setCookie(r.res, '__Host-ventrical_oauth')!.attrs['max-age']).toBe('0');
   });
 
   it('a wrong state, another provider\'s cookie, a missing code or an error parameter are rejected', async () => {
@@ -382,7 +382,7 @@ describe('GET /auth/:provider/callback', () => {
     // error param with a valid state
     const start = (await auth.handle(req('GET', '/auth/google/start')))!;
     const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
-    const oc = `ventrical_oauth=${encodeURIComponent(setCookie(start, 'ventrical_oauth')!.value)}`;
+    const oc = `__Host-ventrical_oauth=${encodeURIComponent(setCookie(start, '__Host-ventrical_oauth')!.value)}`;
     const e = (await auth.handle(req('GET', `/auth/google/callback?error=access_denied&state=${state}`, { cookie: oc })))!;
     expect(e.status).toBe(400);
     expect((await e.json() as any).error.code).toBe('oauth_error');
@@ -404,7 +404,7 @@ describe('GET /auth/:provider/callback', () => {
     const start = (await auth.handle(req('GET', '/auth/google/start')))!;
     const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
     const res = (await auth.handle(new Request(`https://evil.example.test/auth/google/callback?code=c&state=${state}`, {
-      headers: { cookie: `ventrical_oauth=${encodeURIComponent(setCookie(start, 'ventrical_oauth')!.value)}`, host: 'evil.example.test' },
+      headers: { cookie: `__Host-ventrical_oauth=${encodeURIComponent(setCookie(start, '__Host-ventrical_oauth')!.value)}`, host: 'evil.example.test' },
       redirect: 'manual',
     })))!;
     expect(loc(res)).toBe(`${FRONT}/`);
@@ -430,7 +430,7 @@ describe('GET /auth/:provider/callback', () => {
     }
     const uid = (await store.findUserByIdentity('google', 'g1'))!.id;
     const ids = await Promise.all([a, b].map(async ({ res }) =>
-      (await auth.getSession(req('GET', '/x', { cookie: `ventrical_session=${sessionCookieOf(res)!.value}` })))!.user.id));
+      (await auth.getSession(req('GET', '/x', { cookie: `__Host-ventrical_session=${sessionCookieOf(res)!.value}` })))!.user.id));
     expect(ids).toEqual([uid, uid]);
     expect(newFlags.sort()).toEqual([false, true]);
   });

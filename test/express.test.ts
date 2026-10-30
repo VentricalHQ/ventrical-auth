@@ -51,20 +51,20 @@ describe('express adapter', () => {
 
     const start = await get(`${base}/auth/google/start`);
     expect(start.status).toBe(302);
-    const oauth = cookieOf(start, 'ventrical_oauth')!;
+    const oauth = cookieOf(start, '__Host-ventrical_oauth')!;
     const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
 
     const cb = await get(`${base}/auth/google/callback?code=fake-code&state=${encodeURIComponent(state)}`, { cookie: oauth });
     expect(cb.status).toBe(302);
     expect(cb.headers.get('location')!.startsWith(FRONT)).toBe(true);
-    const session = cookieOf(cb, 'ventrical_session')!;
+    const session = cookieOf(cb, '__Host-ventrical_session')!;
     expect(session).toBeDefined();
     expect(store.sessions.size).toBe(1);
 
     const out = await fetch(`${base}/auth/logout`, { method: 'POST', headers: { cookie: session, origin: FRONT } });
     expect(out.status).toBe(204);
     expect(store.sessions.size).toBe(0);
-    expect(out.headers.getSetCookie().some((c) => /^ventrical_session=;/.test(c))).toBe(true);
+    expect(out.headers.getSetCookie().some((c) => /^__Host-ventrical_session=;/.test(c))).toBe(true);
   });
 
   it('an unrelated route still reaches the app\'s own handlers', async () => {
@@ -91,7 +91,7 @@ describe('express adapter', () => {
     const user = await store.createUserWithIdentity({ provider: 'google', subject: 'g9', emailVerified: true });
     const sid = newSessionId();
     await store.transaction((tx) => store.createSessionUnlessSuspended(user.id, sid.idHash, new Date(Date.now() + 864e5), { provider: 'google', subject: 'g9' }, tx));
-    const ok = await get(`${base}/me`, { cookie: `ventrical_session=${sid.id}` });
+    const ok = await get(`${base}/me`, { cookie: `__Host-ventrical_session=${sid.id}` });
     expect(ok.status).toBe(200);
     expect(await ok.json()).toEqual({ id: user.id });
   });
@@ -113,7 +113,7 @@ describe('express adapter', () => {
     });
     const res = await get(`${base}/auth/google/start`);
     const cookies = res.headers.getSetCookie();
-    expect(cookies.some((c) => c.startsWith('ventrical_oauth='))).toBe(true);
+    expect(cookies.some((c) => c.startsWith('__Host-ventrical_oauth='))).toBe(true);
     expect(cookies).toContain('a=1; Path=/; Expires=Wed, 21 Oct 2026 07:28:00 GMT');
     expect(cookies).toContain('b=2; Path=/');
     expect(cookies.length).toBe(3);
@@ -150,7 +150,7 @@ describe('express adapter', () => {
     const { auth, store } = setup();
     const base = await listen((app, a) => app.use(authRouter(a)), auth);
     const sid = await seedSession(store, new Date(Date.now() + 864e5));
-    const cookie = `ventrical_session=${sid.id}`;
+    const cookie = `__Host-ventrical_session=${sid.id}`;
     expect((await fetch(`${base}/auth/logout`, { method: 'POST', headers: { cookie } })).status).toBe(403);
     expect((await fetch(`${base}/auth/logout`, { method: 'POST', headers: { cookie, origin: 'https://evil.example.test' } })).status).toBe(403);
     expect(store.sessions.size).toBe(1);
@@ -162,13 +162,13 @@ describe('express adapter', () => {
       app.get('/me', requireSession(a), (req, res) => { res.json({ id: req.user!.id }); });
     }, auth);
     const old = await seedSession(store, new Date(Date.now() + 10 * 864e5));
-    const res = await get(`${base}/me`, { cookie: `ventrical_session=${old.id}` });
+    const res = await get(`${base}/me`, { cookie: `__Host-ventrical_session=${old.id}` });
     expect(res.status).toBe(200);
-    expect(cookieOf(res, 'ventrical_session')).toBe(`ventrical_session=${old.id}`);
+    expect(cookieOf(res, '__Host-ventrical_session')).toBe(`__Host-ventrical_session=${old.id}`);
     const fresh = await seedSession(store, new Date(Date.now() + 30 * 864e5 - 1000), 'g6');
-    const res2 = await get(`${base}/me`, { cookie: `ventrical_session=${fresh.id}` });
+    const res2 = await get(`${base}/me`, { cookie: `__Host-ventrical_session=${fresh.id}` });
     expect(res2.status).toBe(200);
-    expect(cookieOf(res2, 'ventrical_session')).toBeUndefined();
+    expect(cookieOf(res2, '__Host-ventrical_session')).toBeUndefined();
   });
 
   it('absolute-form and asterisk request targets call next() instead of building a URL', async () => {
@@ -222,14 +222,14 @@ describe('express adapter', () => {
     const anon = await get(`${base}/who`);
     expect(anon.status).toBe(200);
     expect(await anon.json()).toEqual({ id: null, reqUser: null });
-    expect((await get(`${base}/who`, { cookie: 'ventrical_session=garbage' })).status).toBe(200);
+    expect((await get(`${base}/who`, { cookie: '__Host-ventrical_session=garbage' })).status).toBe(200);
 
     const old = await seedSession(store, new Date(Date.now() + 10 * 864e5), 'g7');
-    const res = await get(`${base}/who`, { cookie: `ventrical_session=${old.id}` });
+    const res = await get(`${base}/who`, { cookie: `__Host-ventrical_session=${old.id}` });
     const body = await res.json() as { id: string; reqUser: string };
     expect(body.id).toBe(body.reqUser);
     expect(body.id).toBeTruthy();
-    expect(cookieOf(res, 'ventrical_session')).toBe(`ventrical_session=${old.id}`); // refreshed cookie forwarded
+    expect(cookieOf(res, '__Host-ventrical_session')).toBe(`__Host-ventrical_session=${old.id}`); // refreshed cookie forwarded
   });
 
   it('currentSession returns undefined for absolute-form targets without building a URL', async () => {

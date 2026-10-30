@@ -12,12 +12,12 @@ describe('next adapter', () => {
     const { GET, POST } = authRouteHandlers(auth);
     const start = await GET(r('/auth/google/start'));
     expect(start.status).toBe(302);
-    const oauth = cookieNamed(start.headers.getSetCookie(), 'ventrical_oauth')!;
+    const oauth = cookieNamed(start.headers.getSetCookie(), '__Host-ventrical_oauth')!;
     const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
     const cb = await GET(r(`/auth/google/callback?code=fake-code&state=${encodeURIComponent(state)}`, { headers: { cookie: oauth } }));
     expect(cb.status).toBe(302);
     expect(cb.headers.get('location')!.startsWith(FRONT)).toBe(true);
-    const session = cookieNamed(cb.headers.getSetCookie(), 'ventrical_session')!;
+    const session = cookieNamed(cb.headers.getSetCookie(), '__Host-ventrical_session')!;
     expect(session).toBeDefined();
     expect(store.sessions.size).toBe(1);
 
@@ -74,9 +74,9 @@ describe('next adapter', () => {
     const get = getSessionFromRequest(auth);
     expect(await get(r('/me'))).toBeUndefined();
     const { user, sid } = await seedSession(store, new Date(Date.now() + 10 * 864e5));
-    const s = await get(r('/me', { headers: { cookie: `ventrical_session=${sid.id}` } }));
+    const s = await get(r('/me', { headers: { cookie: `__Host-ventrical_session=${sid.id}` } }));
     expect(s?.user.id).toBe(user.id);
-    expect(s?.setCookie?.startsWith(`ventrical_session=${sid.id};`)).toBe(true);
+    expect(s?.setCookie?.startsWith(`__Host-ventrical_session=${sid.id};`)).toBe(true);
 
     const need = requireSession(auth);
     const anon = await need(r('/me'));
@@ -84,7 +84,7 @@ describe('next adapter', () => {
     expect((anon as Response).status).toBe(401);
     expect((await (anon as Response).json() as any).error.code).toBe('unauthenticated');
     store.suspend(user.id);
-    const sus = await need(r('/me', { headers: { cookie: `ventrical_session=${sid.id}` } })) as Response;
+    const sus = await need(r('/me', { headers: { cookie: `__Host-ventrical_session=${sid.id}` } })) as Response;
     expect(sus.status).toBe(403);
     expect(await sus.json()).toEqual({ error: { code: 'account_suspended', message: SUSPENDED_MESSAGE } });
   });

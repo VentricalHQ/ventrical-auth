@@ -21,12 +21,12 @@ describe('fastify adapter', () => {
     await app.register(authPlugin(auth));
     const start = await app.inject({ method: 'GET', url: '/auth/google/start' });
     expect(start.statusCode).toBe(302);
-    const oauth = cookieNamed(setCookies(start), 'ventrical_oauth')!;
+    const oauth = cookieNamed(setCookies(start), '__Host-ventrical_oauth')!;
     const state = new URL(start.headers.location as string).searchParams.get('state')!;
     const cb = await app.inject({ method: 'GET', url: `/auth/google/callback?code=fake-code&state=${encodeURIComponent(state)}`, headers: { cookie: oauth } });
     expect(cb.statusCode).toBe(302);
     expect((cb.headers.location as string).startsWith(FRONT)).toBe(true);
-    const session = cookieNamed(setCookies(cb), 'ventrical_session')!;
+    const session = cookieNamed(setCookies(cb), '__Host-ventrical_session')!;
     expect(store.sessions.size).toBe(1);
 
     expect((await app.inject({ method: 'POST', url: '/auth/logout', headers: { cookie: session } })).statusCode).toBe(403);
@@ -35,7 +35,7 @@ describe('fastify adapter', () => {
     const out = await app.inject({ method: 'POST', url: '/auth/logout', headers: { cookie: session, origin: FRONT } });
     expect(out.statusCode).toBe(204);
     expect(store.sessions.size).toBe(0);
-    expect(setCookies(out).some((c) => /^ventrical_session=;/.test(c))).toBe(true);
+    expect(setCookies(out).some((c) => /^__Host-ventrical_session=;/.test(c))).toBe(true);
   });
 
   it('unowned paths fall through to the app', async () => {
@@ -111,7 +111,7 @@ describe('fastify adapter', () => {
     await app.register(authPlugin(auth));
     const port = await listen(app);
     const { sid } = await seedSession(store, new Date(Date.now() + 864e5));
-    const cookie = `Cookie: ventrical_session=${sid.id}\r\n`;
+    const cookie = `Cookie: __Host-ventrical_session=${sid.id}\r\n`;
     for (const ct of ['application/json', 'application/x-weird']) {
       const body = '{"a":1}';
       const head = `${cookie}Content-Type: ${ct}\r\nContent-Length: ${body.length}\r\n`;
@@ -151,13 +151,13 @@ describe('fastify adapter', () => {
     expect(anon.json()).toEqual({ error: { code: 'unauthenticated', message: 'Sign in required' } });
 
     const { user, sid } = await seedSession(store, new Date(Date.now() + 10 * 864e5));
-    const ok = await app.inject({ method: 'GET', url: '/me', headers: { cookie: `ventrical_session=${sid.id}` } });
+    const ok = await app.inject({ method: 'GET', url: '/me', headers: { cookie: `__Host-ventrical_session=${sid.id}` } });
     expect(ok.statusCode).toBe(200);
     expect(ok.json()).toEqual({ id: user.id });
-    expect(cookieNamed(setCookies(ok), 'ventrical_session')).toBe(`ventrical_session=${sid.id}`);
+    expect(cookieNamed(setCookies(ok), '__Host-ventrical_session')).toBe(`__Host-ventrical_session=${sid.id}`);
 
     store.suspend(user.id);
-    const sus = await app.inject({ method: 'GET', url: '/me', headers: { cookie: `ventrical_session=${sid.id}` } });
+    const sus = await app.inject({ method: 'GET', url: '/me', headers: { cookie: `__Host-ventrical_session=${sid.id}` } });
     expect(sus.statusCode).toBe(403);
     expect(sus.json()).toEqual({ error: { code: 'account_suspended', message: SUSPENDED_MESSAGE } });
   });
