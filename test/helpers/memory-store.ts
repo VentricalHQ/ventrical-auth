@@ -80,9 +80,9 @@ export function createMemoryStore(clock: () => Date = () => new Date()): MemoryS
       else if (update.email !== undefined) i.email = update.email;
       i.emailVerified = update.emailVerified;
     },
-    async emailBelongsToSuspendedUser(email) {
+    async emailBelongsToSuspendedUser(email, _tx, opts) {
       const e = email.toLowerCase();
-      return identities.some((i) => i.emailVerified && i.email?.toLowerCase() === e && isSuspended(i.userId));
+      return identities.some((i) => i.userId !== opts?.exceptUserId && i.emailVerified && i.email?.toLowerCase() === e && isSuspended(i.userId));
     },
     async createSessionUnlessSuspended(userId, idHash, expiresAt, identity) {
       if (!users.has(userId) || isSuspended(userId)) return false; // unknown user: refused, as the pg store does

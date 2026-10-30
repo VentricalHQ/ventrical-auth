@@ -102,13 +102,14 @@ export function pgAuthStore(pool: pg.Pool): AuthStore<pg.PoolClient> {
       }
     },
 
-    async emailBelongsToSuspendedUser(email, tx) {
+    async emailBelongsToSuspendedUser(email, tx, opts) {
       // users.email is not consulted: it is an unverified copy and must not let a stranger block the real owner.
       // With a tx, lock every matching user row (suspended or not) so a suspension cannot commit before we do.
       const r = await db(tx).query(
         `select u.suspended_at from users u join identities i on i.user_id = u.id
-         where i.email_verified and lower(i.email) = lower($1)${tx ? ' for share of u' : ''}`,
-        [email],
+         where i.email_verified and lower(i.email) = lower($1)
+           and ($2::text is null or u.id <> $2)${tx ? ' for share of u' : ''}`,
+        [email, opts?.exceptUserId ?? null],
       );
       return r.rows.some((row) => row.suspended_at !== null);
     },

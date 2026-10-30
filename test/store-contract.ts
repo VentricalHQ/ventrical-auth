@@ -107,6 +107,19 @@ export function storeContract(name: string, make: () => Promise<StoreHarness>): 
       expect(await store.transaction((tx) => store.emailBelongsToSuspendedUser('unverified@example.test', tx))).toBe(false);
     });
 
+    it('emailBelongsToSuspendedUser ignores the exceptUserId row only', async () => {
+      const { store, suspend } = await fresh();
+      const a = await store.createUserWithIdentity({ ...IDENT, email: 'twin@example.test', emailVerified: true });
+      const b = await store.createUserWithIdentity({ provider: 'github', subject: 'h-twin', email: 'twin@example.test', emailVerified: true });
+      await suspend(a.id);
+      expect(await store.emailBelongsToSuspendedUser('twin@example.test')).toBe(true);
+      expect(await store.emailBelongsToSuspendedUser('twin@example.test', undefined, { exceptUserId: a.id })).toBe(false);
+      expect(await store.emailBelongsToSuspendedUser('twin@example.test', undefined, { exceptUserId: b.id })).toBe(true);
+      expect(await store.transaction((tx) => store.emailBelongsToSuspendedUser('twin@example.test', tx, { exceptUserId: a.id }))).toBe(false);
+      expect(await store.transaction((tx) => store.emailBelongsToSuspendedUser('twin@example.test', tx, { exceptUserId: b.id }))).toBe(true);
+      expect(await store.transaction((tx) => store.emailBelongsToSuspendedUser('twin@example.test', tx, {}))).toBe(true);
+    });
+
     it('createSessionUnlessSuspended creates a session for an active user', async () => {
       const { store } = await fresh();
       const user = await store.createUserWithIdentity({ ...IDENT, emailVerified: true });

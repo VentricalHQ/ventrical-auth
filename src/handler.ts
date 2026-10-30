@@ -264,24 +264,20 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
     const attempt = (found: Awaited<ReturnType<typeof config.store.findUserByIdentity>>) => config.store.transaction(async (tx) => {
       let user: AuthUser | undefined = found && { id: found.id, email: found.email, name: found.name };
       let isNew = false;
+      // Every sign-in, new or returning: a verified email that belongs to a suspended user (another account's row; the
+      // signing-in user's own row is ignored) refuses the sign-in. Authoritative: locked, same tx as the writes below.
+      if (profile.emailVerified && profile.email !== undefined
+        && (await config.store.emailBelongsToSuspendedUser(profile.email, tx, found ? { exceptUserId: found.id } : undefined))) {
+        throw new SuspendedSignal();
+      }
       if (found && user && config.store.updateIdentity && profile.email !== undefined && found.identity
         && (found.identity.email !== profile.email || found.identity.emailVerified !== profile.emailVerified)) {
-        // A verified email newly claimed by this identity (changed, or just became verified) must not belong to a suspended
-        // user: otherwise a suspended person could take their old address over on a second account. Locked, same tx.
-        if (profile.emailVerified && (found.identity.email !== profile.email || !found.identity.emailVerified)
-          && (await config.store.emailBelongsToSuspendedUser(profile.email, tx))) {
-          throw new SuspendedSignal();
-        }
         // Returning user whose provider email changed: keep the stored identity current (it feeds the suspended-email
         // check). Same tx, so it commits or rolls back with the sign-in; a retry re-reads the identity and is idempotent.
         // A profile without an email never clears the stored one.
         await config.store.updateIdentity(provider.name, profile.subject, { email: profile.email, emailVerified: profile.emailVerified }, tx);
       }
       if (!user) {
-        // Authoritative suspended check, in the same transaction as the writes below.
-        if (suspendedEmail !== undefined && (await config.store.emailBelongsToSuspendedUser(suspendedEmail, tx))) {
-          throw new SuspendedSignal();
-        }
         user = await config.store.createUserWithIdentity({ ...identity, ...(profile.name !== undefined ? { name: profile.name } : {}) }, tx);
         isNew = true;
       }

@@ -110,6 +110,77 @@ function suite(name: string, make: () => Promise<Harness>) {
       } finally { await h.close?.(); }
     });
 
+    /** Two users who each verified the same email on different providers (never linked), before one is suspended. */
+    async function twin() {
+      const h = await make();
+      const email = 'shared@example.test';
+      const errors: { stage: string; code: string }[] = [];
+      const ga: ProviderProfile = { subject: 'g-twin', email, emailVerified: true };
+      const gh: ProviderProfile = { subject: 'h-twin', email, emailVerified: true };
+      const auth = setup({ google: ga, github: gh }, h.store, errors);
+      expect((await flow(auth, 'google')).headers.get('location')).toBe(`${FRONT}/`);
+      expect((await flow(auth, 'github')).headers.get('location')).toBe(`${FRONT}/`);
+      return { h, email, ga, gh, auth, errors };
+    }
+
+    it('sign-in: a returning user whose stored email is unchanged is refused when another user with that verified email is suspended', async () => {
+      const { h, auth, errors } = await twin();
+      try {
+        await h.suspend(await userId(h.store, 'google', 'g-twin'));
+        errors.length = 0;
+        const res = await flow(auth, 'github');
+        expect(res.headers.get('location')).toBe(`${FRONT}/signin?error=suspended`);
+        expect(setCookie(res, '__Host-ventrical_session')).toBeUndefined();
+        expect(errors).toContainEqual({ stage: 'callback', code: 'suspended' });
+      } finally { await h.close?.(); }
+    });
+
+    it('sign-in: a returning user whose own row is the only match is not blocked', async () => {
+      const { h, auth } = await twin();
+      try {
+        const res = await flow(auth, 'github');
+        expect(res.headers.get('location')).toBe(`${FRONT}/`);
+        expect(setCookie(res, '__Host-ventrical_session')).toBeDefined();
+      } finally { await h.close?.(); }
+    });
+
+    it('sign-in: a returning user with an unrelated verified email is unaffected by the suspension', async () => {
+      const { h, gh, auth } = await twin();
+      try {
+        await h.suspend(await userId(h.store, 'google', 'g-twin'));
+        gh.email = 'else@example.test';
+        const res = await flow(auth, 'github');
+        expect(res.headers.get('location')).toBe(`${FRONT}/`);
+        expect(setCookie(res, '__Host-ventrical_session')).toBeDefined();
+      } finally { await h.close?.(); }
+    });
+
+    it('sign-in: the handler passes the returning user id as exceptUserId, and none for a new user', async () => {
+      const { h, auth } = await twin();
+      try {
+        const calls: (string | undefined)[] = [];
+        const orig = h.store.emailBelongsToSuspendedUser.bind(h.store);
+        h.store.emailBelongsToSuspendedUser = (email, tx, opts) => { if (tx) calls.push(opts?.exceptUserId); return orig(email, tx, opts); };
+        await flow(auth, 'github');
+        expect(calls).toEqual([await userId(h.store, 'github', 'h-twin')]);
+        calls.length = 0;
+        const fresh = setup({ google: { subject: 'g-new', email: 'new@example.test', emailVerified: true } }, h.store);
+        await flow(fresh, 'google');
+        expect(calls).toEqual([undefined]);
+      } finally { await h.close?.(); }
+    });
+
+    it('sign-in: an unverified email is not checked for a returning user', async () => {
+      const { h, gh, auth } = await twin();
+      try {
+        await h.suspend(await userId(h.store, 'google', 'g-twin'));
+        gh.emailVerified = false;
+        const res = await flow(auth, 'github');
+        expect(res.headers.get('location')).toBe(`${FRONT}/`);
+        expect(setCookie(res, '__Host-ventrical_session')).toBeDefined();
+      } finally { await h.close?.(); }
+    });
+
     it('link: an unrelated verified email links normally', async () => {
       const { h, session } = await world();
       try {
