@@ -23,12 +23,14 @@ describe('crypto', () => {
     const plain = 'super-secret-plaintext';
     const [v, iv, tag, data] = encrypt(plain, key).split(':') as [string, string, string, string];
     const flipped = (data[0] === 'A' ? 'B' : 'A') + data.slice(1);
+    let caught: unknown;
     try {
       decrypt([v, iv, tag, flipped].join(':'), key);
-      expect.unreachable();
     } catch (e) {
-      expect((e as Error).message).not.toContain(plain);
+      caught = e;
     }
+    expect(caught).toBeInstanceOf(SecretError);
+    expect((caught as Error).message).not.toContain(plain);
   });
 
   it('hashToken is 64 hex chars and stable', () => {
