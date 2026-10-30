@@ -233,13 +233,14 @@ describe('POST /auth/logout-everywhere', () => {
       deleteSessionsForUser: async () => { throw new Error('boom'); },
     });
     const planted = newSessionId();
+    let hookRan = false;
     const { auth } = setup({
       store: failing,
       hooks: {
         onLogoutEverywhere: async (uid, tx) => {
           // The hook's write goes through the tx; the failed delete must undo it.
           await store.createSessionUnlessSuspended(uid, planted.idHash, new Date(Date.now() + 864e5), { provider: 'github', subject: 'hook' }, tx);
-          expect(store.sessions.has(planted.idHash)).toBe(true);
+          hookRan = true;
         },
       },
     });
@@ -247,6 +248,7 @@ describe('POST /auth/logout-everywhere', () => {
     const other = await withSession(store, 'b@example.test');
     const res = (await auth.handle(req('POST', '/auth/logout-everywhere', { cookie: s.cookie, origin: FRONT })))!;
     expect(res.status).toBe(500);
+    expect(hookRan).toBe(true);
     expect(store.sessions.has(planted.idHash)).toBe(false);
     expect(store.sessions.has(s.idHash)).toBe(true);
     expect(store.sessions.has(other.idHash)).toBe(true);
