@@ -25,7 +25,7 @@ Requirements: Node 22 or newer, ESM only. `openid-client` is pinned to exactly 6
 "@ventrical/auth": "github:VentricalHQ/ventrical-auth#v0.1.0"
 ```
 
-The package builds itself on install (`prepare` runs `npm run build`). Consumers need access to the private repository. TypeScript consumers of the Express adapter also need `@types/express` (the adapter exports Express types), and Express 5 itself is an optional peer dependency needed only for `@ventrical/auth/express`. `pg` is a regular dependency.
+The package builds itself on install (`prepare` runs `npm run build`). Consumers need access to the private repository. TypeScript consumers of the Express adapter also need `@types/express` (the adapter exports Express types), and consumers of `@ventrical/auth/pg` need `@types/pg` (the store's signature uses `pg` types). Express 5 itself is an optional peer dependency needed only for `@ventrical/auth/express`. `pg` is a regular dependency.
 
 Entry points:
 
@@ -130,7 +130,7 @@ The frontend and the API must share a registrable domain: sessions use `sameSite
 - The JWKS is cached for 5 minutes per URI. An unknown `kid` triggers exactly one refetch, then fails.
 - Fails closed: a JWKS fetch error, a non-OK or non-JSON response, a malformed key set or a bad signature all end the sign-in with a generic error. The error never includes the token, key material or response bodies.
 
-This is stricter than Kagaya, whose comment claims it verifies the signature but whose `openid-client` call does not. Kagaya's later migration should know about the gap.
+The upstream implementation relied on TLS to the token endpoint; this package additionally verifies the signature. Anyone migrating from the upstream code should be aware of the difference.
 
 ## Hooks
 
@@ -180,17 +180,36 @@ storeContract('my store', async () => {
 
 `@ventrical/auth/pg` exports `pgAuthStore(pool)` (a `pg.Pool`) and `migrationsDir`, the absolute path of the shipped SQL migrations. Transactions are plain `BEGIN` / `COMMIT` / `ROLLBACK`; if `ROLLBACK` itself fails the original error is still thrown and the client is destroyed rather than returned to the pool.
 
-The migrations are plain SQL files (currently `001_auth.sql`: `users`, `identities`, `sessions`, with `users.suspended_at`). Apply them in file-name order with your own runner:
+The migrations are plain SQL files (currently `001_auth.sql`: `users`, `identities`, `sessions`, with `users.suspended_at`). Apply them in file-name order, **each file once**: `001_auth.sql` has no `if not exists`, so running it again fails with "relation already exists". Track what has been applied with your own migration runner, or with a small table as below:
 
 ```ts
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { migrationsDir } from '@ventrical/auth/pg';
 
+await pool.query('create table if not exists _migrations (name text primary key, applied_at timestamptz not null default now())');
 for (const file of readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).sort()) {
-  await pool.query(readFileSync(join(migrationsDir, file), 'utf8'));
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Skip files already recorded; a concurrent starter inserting the same name makes this fail and roll back.
+    const done = await client.query('insert into _migrations (name) values ($1) on conflict do nothing', [file]);
+    if (done.rowCount === 1) await client.query(readFileSync(join(migrationsDir, file), 'utf8'));
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 ```
+
+## Operational notes
+
+- **Suspending a user:** set `users.suspended_at` and leave their session rows in place. If you delete the sessions, a suspended person's old cookie no longer matches anything and the `403 account_suspended` answer degrades to `401 unauthenticated`.
+- **Non-browser clients:** the logout POSTs require an `Origin` or `Referer` header from a trusted origin (see above). Scripts and mobile clients must send one.
+- **Expired sessions are not purged by the package.** Expired rows are ignored but stay in the table, so delete them periodically, for example `delete from sessions where expires_at < now()` on a schedule.
 
 Keep your own data in your own tables keyed by user id, not as extra columns on `users`.
 
@@ -219,7 +238,7 @@ The code was extracted, by copying, from the Kagaya backend's sign-in code (rout
 
 ## Release
 
-There is no release automation, no CI workflow, and **no tag has been created**. When Ashwin decides to cut the first version, the step is:
+There is no release automation, no CI workflow, and **no tag has been created**. The maintainers tag `v0.1.0` when ready; the step is:
 
 ```sh
 git tag v0.1.0
@@ -228,5 +247,7 @@ git tag v0.1.0
 (then pushing the tag), after which consumers install it with the line shown under [Install](#install): `"@ventrical/auth": "github:VentricalHQ/ventrical-auth#v0.1.0"`. Until that tag exists the install line does not resolve. The package is not published to npm; that waits until it goes open source (the license is Apache-2.0).
 
 ## Not in v0.1
+
+There is no logging and no `onError` hook, by design: the package never writes provider or store errors anywhere, so a `?error=sign_in_failed` redirect leaves no trace. An app that needs diagnosis should wrap its own store and hooks and log there. An optional error hook is planned.
 
 Firms, roles and invites (they live in the apps), Drive and OneDrive consent, admin roles, connector linking, OAuth token revocation, passwords, email magic links, MFA and SAML. Next.js, Hono and Fastify adapters are not built; each should be a few dozen lines over `handle`.
