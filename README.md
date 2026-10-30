@@ -15,9 +15,9 @@ Requirements: Node 22 or newer, ESM only. `openid-client` is pinned to exactly 6
 - Email counts as verified only when the provider proves it: Google's `email_verified`; Microsoft only when `xms_edov` is true on the `email` claim (`preferred_username` is never verified); GitHub only for the primary verified email.
 - The OAuth state cookie is encrypted (AES-256-GCM, bound to its purpose), lives 10 minutes, and is cleared on every callback outcome.
 - Accounts are never linked by email. Linking happens only inside the session that started the flow (bound at `/start`).
-- A suspended person cannot return through another provider with the same verified email.
+- A suspended person cannot attach their verified email to a new or changed identity (a new sign-up, or an identity whose email changes to it). An already-existing second account is a separate user: suspend it too, and call `deleteSessionsForUser` for each suspended user.
 - The suspended check and the session insert share one transaction, with the user row held `FOR SHARE`.
-- Sessions: random id, only its hash stored, 30-day life refreshed on use (when less than 29 days remain), `httpOnly`, `sameSite=lax`, `secure` when `publicUrl` is https. Log out, and log out everywhere.
+- Sessions: random id, only its hash stored, 30-day life refreshed on use (when less than 29 days remain) but never beyond a 90-day absolute cap from creation (`sessionMaxAgeMs`), `httpOnly`, `sameSite=lax`, `secure` when `publicUrl` is https. Log out, and log out everywhere.
 - Post-sign-in redirects accept only a single-leading-slash relative path, otherwise `/`.
 - Provider errors never leak codes, tokens, key material or response bodies into responses or logs; the package logs nothing.
 
@@ -211,7 +211,7 @@ All hooks are optional. `Tx` is the transaction handle type of your store.
   | --- | --- |
   | `start` | `provider_disabled`, `internal_error` |
   | `callback` | `oauth_error`, `provider_disabled`, `exchange_failed` (code exchange or ID-token and signature verification threw; the response is still `400 oauth_error`), `suspended`, `sign_in_failed`, the `canCreateAccount` deny reason, `internal_error` |
-  | `link` | `identity_in_use`, `link_failed`, `internal_error` |
+  | `link` | `identity_in_use`, `link_failed`, `suspended`, `internal_error` |
   | `logout` | `forbidden`, `unauthenticated`, `account_suspended`, `internal_error` |
 
   A `canCreateAccount` reason is also placed in the redirect URL (`?error=`), so it must be a short code and must not contain PII.
@@ -229,7 +229,7 @@ All hooks are optional. `Tx` is the transaction handle type of your store.
 - `resolveRedirect(path)` returns `{ target: 'backend' | 'frontend', path }` to decide whether a post-sign-in path belongs to the backend (`publicUrl`) or the frontend (`frontendUrl`). The default is the frontend.
 - `onLogoutEverywhere(userId, tx)` runs in the same transaction that deletes the user's sessions, so an app can revoke its own credentials atomically.
 
-Sign-in failures redirect to `<frontendUrl>/signin?error=<code>` with codes such as `suspended` and `sign_in_failed`; link flows redirect to `<frontendUrl>/settings?error=identity_in_use` or `link_failed`. Failures before a profile is known (`invalid_state`, `oauth_error`, `provider_disabled`, `not_found`) are JSON errors: `{ "error": { "code", "message" } }`.
+Sign-in failures redirect to `<frontendUrl>/signin?error=<code>` with codes such as `suspended` and `sign_in_failed`; link flows redirect to `<frontendUrl>/settings?error=identity_in_use`, `link_failed` or `suspended`. Failures before a profile is known (`invalid_state`, `oauth_error`, `provider_disabled`, `not_found`) are JSON errors: `{ "error": { "code", "message" } }`.
 
 ## The `AuthStore` contract
 
@@ -244,7 +244,7 @@ Each app implements `AuthStore<Tx>` over its own database (or uses the Postgres 
 | `emailBelongsToSuspendedUser(email, tx?)` | Verified identity emails only, case-insensitive. **With a `tx` it must hold `FOR SHARE` (or an equivalent lock) on the matching user rows**, so a suspension cannot commit between the check and the end of the transaction. |
 | `createSessionUnlessSuspended(userId, idHash, expiresAt, identity, tx)` | Holds the user row `FOR SHARE`; inserts the session and returns `true`, or returns `false` when the user is suspended. |
 | `getSessionWithExpiry(idHash, now)` | The session's user and expiry, excluding suspended users. Also `verifiedEmail`: the email of the identity the session was created with when that identity is verified, else `null`. |
-| `touchSession(idHash, expiresAt)`, `deleteSession(idHash, tx?)`, `deleteSessionsForUser(userId, tx?)` | As named; `deleteSessionsForUser` returns the number deleted. With a `tx`, `deleteSession` commits or rolls back with it (the sign-in transaction uses this to drop the previous session). |
+| `touchSession(idHash, expiresAt)`, `deleteSession(idHash, tx?)`, `deleteSessionsForUser(userId, tx?)` | As named; `deleteSessionsForUser` returns the number deleted. With a `tx`, `deleteSession` commits or rolls back with it (the sign-in transaction uses this to drop the previous session). A custom store's `deleteSession` must accept the optional `tx` and run in it: otherwise the old-session delete runs outside the sign-in transaction, and a suspended rollback would still delete the old session. |
 | `purgeExpiredSessions(now, opts?)` | **Required.** Deletes every session with `expires_at <= now` and returns how many were removed. With `opts.maxAgeMs` it also deletes sessions with `created_at + maxAgeMs <= now`. Custom `AuthStore` implementers must add it. |
 | `updateIdentity?(provider, subject, update, tx?)` | Optional. Updates the stored `email` and `emailVerified` of an existing identity (`email` undefined leaves it unchanged, null clears it; a no-op when the identity does not exist). The handler calls it inside the sign-in transaction on a returning sign-in, so the stored identity email stays current. Without it the stored email is not refreshed. |
 | `isSuspendedCredential?(idHash, now)` | Optional, read-only. Lets `requireSession` answer `account_suspended` instead of `unauthenticated`. |
@@ -300,6 +300,7 @@ for (const file of readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).
 - **Suspending a user:** set `users.suspended_at`. Their sessions are only hidden while suspended, not deleted, so they **reappear when you un-suspend** the user. Your app MUST therefore call `store.deleteSessionsForUser(userId)` when it suspends someone, unless it deliberately wants old sessions to come back on un-suspend. Trade-off: once the sessions are deleted, a suspended person's old cookie matches nothing and the `403 account_suspended` answer degrades to `401 unauthenticated`.
 - **Non-browser clients:** the logout POSTs require an `Origin` or `Referer` header from a trusted origin (see above). Scripts and mobile clients must send one.
 - **Expired sessions are not purged automatically.** Expired rows are ignored but stay in the table; see [Security notes](#security-notes) for `store.purgeExpiredSessions`.
+- **Upgrading:** sessions that refresh has kept alive for longer than `sessionMaxAgeMs` (default 90 days) are signed out when this version is deployed.
 
 Keep your own data in your own tables keyed by user id, not as extra columns on `users`.
 

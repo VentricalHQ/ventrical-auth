@@ -11,9 +11,9 @@ export type SessionUser = AuthUser & { verifiedEmail: string | null };
 
 /** Default session life: 30 days. */
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-/** A session with less than 29 days left is refreshed on use. */
 /** Default absolute cap on a session's life, from its creation: 90 days. */
 export const SESSION_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+/** A session with less than 29 days left is refreshed on use. */
 export const REFRESH_BELOW_MS = 29 * 24 * 60 * 60 * 1000;
 
 export interface SessionResult {

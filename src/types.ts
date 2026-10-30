@@ -111,7 +111,7 @@ export type CanCreateResult = { allow: true } | { allow: false; reason: string }
  * stack, token, auth code, JWKS or response body, only the error class name.
  *
  * stage: 'start' (GET /auth/:provider/start), 'callback' (GET /auth/:provider/callback, sign-in), 'link' (the same
- *   callback when it completes an account link for a signed-in user), 'logout' (POST /auth/logout and /auth/logout-everywhere).
+ *   callback when it completes an account link for a signed-in user; it can report identity_in_use, link_failed, suspended, internal_error), 'logout' (POST /auth/logout and /auth/logout-everywhere).
  * code: an AuthHttpError code (oauth_error, provider_disabled, forbidden, unauthenticated, account_suspended),
  *   'exchange_failed' (code exchange or ID-token verification threw), 'suspended', 'sign_in_failed', 'identity_in_use',
  *   'link_failed', 'internal_error' (unexpected throw), or the canCreateAccount deny reason.
