@@ -82,6 +82,20 @@ export function pgAuthStore(pool: pg.Pool): AuthStore<pg.PoolClient> {
       await insertIdentity(db(tx), userId, identity);
     },
 
+    async updateIdentity(provider, subject, update, tx) {
+      if (update.email === undefined) {
+        await db(tx).query(
+          'update identities set email_verified = $3 where provider = $1 and subject = $2',
+          [provider, subject, update.emailVerified],
+        );
+      } else {
+        await db(tx).query(
+          'update identities set email = $3, email_verified = $4 where provider = $1 and subject = $2',
+          [provider, subject, update.email, update.emailVerified],
+        );
+      }
+    },
+
     async emailBelongsToSuspendedUser(email, tx) {
       // users.email is not consulted: it is an unverified copy and must not let a stranger block the real owner.
       // With a tx, lock every matching user row (suspended or not) so a suspension cannot commit before we do.

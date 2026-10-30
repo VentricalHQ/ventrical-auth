@@ -177,6 +177,50 @@ export function storeContract(name: string, make: () => Promise<StoreHarness>): 
       expect(await store.getSessionWithExpiry('edge', before)).toBeUndefined();
     });
 
+    it('updateIdentity updates email and verified, leaves email when undefined, clears it on null', async () => {
+      const { store, suspend } = await fresh();
+      if (!store.updateIdentity) throw new Error('updateIdentity missing');
+      const user = await store.createUserWithIdentity({ ...IDENT, email: 'old@example.test', emailVerified: false });
+      await suspend(user.id);
+      expect(await store.emailBelongsToSuspendedUser('old@example.test')).toBe(false);
+      await store.updateIdentity('google', 'g1', { emailVerified: true });
+      expect(await store.emailBelongsToSuspendedUser('old@example.test')).toBe(true);
+      await store.updateIdentity('google', 'g1', { email: 'new@example.test', emailVerified: true });
+      expect(await store.emailBelongsToSuspendedUser('new@example.test')).toBe(true);
+      expect(await store.emailBelongsToSuspendedUser('old@example.test')).toBe(false);
+      await store.updateIdentity('google', 'g1', { email: 'new@example.test', emailVerified: false });
+      expect(await store.emailBelongsToSuspendedUser('new@example.test')).toBe(false);
+      await store.updateIdentity('google', 'g1', { emailVerified: true });
+      expect(await store.emailBelongsToSuspendedUser('new@example.test')).toBe(true);
+      await store.updateIdentity('google', 'g1', { email: null, emailVerified: true });
+      expect(await store.emailBelongsToSuspendedUser('new@example.test')).toBe(false);
+    });
+
+    it('updateIdentity is a no-op for an unknown identity', async () => {
+      const { store } = await fresh();
+      if (!store.updateIdentity) throw new Error('updateIdentity missing');
+      await expect(store.updateIdentity('google', 'nope', { email: 'x@example.test', emailVerified: true })).resolves.toBeUndefined();
+      expect(await store.findUserByIdentity('google', 'nope')).toBeUndefined();
+    });
+
+    it('updateIdentity inside a transaction commits, and a rolled-back transaction keeps the old values', async () => {
+      const { store, suspend } = await fresh();
+      if (!store.updateIdentity) throw new Error('updateIdentity missing');
+      const update = store.updateIdentity.bind(store);
+      const user = await store.createUserWithIdentity({ ...IDENT, email: 'old@example.test', emailVerified: true });
+      await suspend(user.id);
+      await expect(store.transaction(async (tx) => {
+        await update('google', 'g1', { email: 'new@example.test', emailVerified: true }, tx);
+        expect(await store.emailBelongsToSuspendedUser('new@example.test', tx)).toBe(true);
+        throw new Error('boom');
+      })).rejects.toThrow('boom');
+      expect(await store.emailBelongsToSuspendedUser('old@example.test')).toBe(true);
+      expect(await store.emailBelongsToSuspendedUser('new@example.test')).toBe(false);
+      await store.transaction((tx) => update('google', 'g1', { email: 'new@example.test', emailVerified: true }, tx));
+      expect(await store.emailBelongsToSuspendedUser('new@example.test')).toBe(true);
+      expect(await store.emailBelongsToSuspendedUser('old@example.test')).toBe(false);
+    });
+
     it('transaction commits on success and returns the result', async () => {
       const { store } = await fresh();
       const user = await store.transaction((tx) => store.createUserWithIdentity({ ...IDENT, emailVerified: true }, tx));

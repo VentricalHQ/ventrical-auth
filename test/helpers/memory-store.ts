@@ -72,6 +72,13 @@ export function createMemoryStore(): MemoryStore {
       if (identities.some((x) => x.provider === identity.provider && x.subject === identity.subject)) throw new DuplicateIdentityError();
       identities.push({ ...identity, userId });
     },
+    async updateIdentity(provider, subject, update) {
+      const i = identities.find((x) => x.provider === provider && x.subject === subject);
+      if (!i) return;
+      if (update.email === null) delete i.email;
+      else if (update.email !== undefined) i.email = update.email;
+      i.emailVerified = update.emailVerified;
+    },
     async emailBelongsToSuspendedUser(email) {
       const e = email.toLowerCase();
       return identities.some((i) => i.emailVerified && i.email?.toLowerCase() === e && isSuspended(i.userId));

@@ -52,6 +52,16 @@ export interface AuthStore<Tx = unknown> {
   touchSession(idHash: string, expiresAt: Date): Promise<void>;
   deleteSession(idHash: string): Promise<void>;
   deleteSessionsForUser(userId: string, tx?: Tx): Promise<number>;
+  /**
+   * Optional. Updates the stored email and email_verified of an existing identity. `email` undefined leaves the
+   * email unchanged, null clears it. A no-op when the identity does not exist.
+   */
+  updateIdentity?(
+    provider: ProviderName,
+    subject: string,
+    update: { email?: string | null; emailVerified: boolean },
+    tx?: Tx,
+  ): Promise<void>;
   /** Deletes every session with expires_at <= now and returns how many were removed. */
   purgeExpiredSessions(now: Date): Promise<number>;
   isSuspendedCredential?(idHash: string, now: Date): Promise<boolean>;
