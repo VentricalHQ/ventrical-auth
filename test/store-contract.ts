@@ -57,6 +57,24 @@ export function storeContract(name: string, make: () => Promise<StoreHarness>): 
       expect((await store.findUserByIdentity('github', 'h1'))?.id).toBe(user.id);
     });
 
+    it('linkIdentity for an unknown user fails like a foreign-key violation, and is not a duplicate-identity error', async () => {
+      const { store } = await fresh();
+      const err = await store.linkIdentity('no-such-user', { ...IDENT, emailVerified: true }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err).not.toBeInstanceOf(DuplicateIdentityError);
+      // Nothing was attached: the identity is still free.
+      expect(await store.findUserByIdentity('google', 'g1')).toBeUndefined();
+      const user = await store.createUserWithIdentity({ ...IDENT, emailVerified: true });
+      expect((await store.findUserByIdentity('google', 'g1'))?.id).toBe(user.id);
+    });
+
+    it('createSessionUnlessSuspended refuses an unknown user (false, nothing inserted) instead of creating an orphan session', async () => {
+      const { store } = await fresh();
+      expect(await session(store, 'no-such-user', 'orphan', future())).toBe(false);
+      expect(await store.getSessionWithExpiry('orphan', new Date())).toBeUndefined();
+      expect(await store.deleteSessionsForUser('no-such-user')).toBe(0);
+    });
+
     it('emailBelongsToSuspendedUser is true only for a verified identity email of a suspended user, case-insensitively', async () => {
       const { store, suspend } = await fresh();
       const user = await store.createUserWithIdentity({ ...IDENT, email: 'Person@Example.test', emailVerified: true });

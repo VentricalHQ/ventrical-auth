@@ -68,6 +68,7 @@ export function createMemoryStore(): MemoryStore {
       return publicUser(user);
     },
     async linkIdentity(userId, identity) {
+      if (!users.has(userId)) throw new Error('foreign key violation: unknown user'); // like Postgres, not a DuplicateIdentityError
       if (identities.some((x) => x.provider === identity.provider && x.subject === identity.subject)) throw new DuplicateIdentityError();
       identities.push({ ...identity, userId });
     },
@@ -76,7 +77,7 @@ export function createMemoryStore(): MemoryStore {
       return identities.some((i) => i.emailVerified && i.email?.toLowerCase() === e && isSuspended(i.userId));
     },
     async createSessionUnlessSuspended(userId, idHash, expiresAt, identity) {
-      if (isSuspended(userId)) return false;
+      if (!users.has(userId) || isSuspended(userId)) return false; // unknown user: refused, as the pg store does
       sessions.set(idHash, { userId, expiresAt, identity });
       return true;
     },
