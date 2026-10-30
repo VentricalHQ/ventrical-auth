@@ -50,6 +50,8 @@ export interface OAuthState {
   nonce?: string;
   redirect: string;
   linkUserId?: string;
+  /** Issued-at, epoch ms from the injected clock; the callback rejects a state older than OAUTH_STATE_MAX_AGE_SEC. */
+  iat: number;
 }
 
 export function sealOAuthState(s: OAuthState, key: Buffer): string {
@@ -63,9 +65,10 @@ export function openOAuthState(raw: string | undefined, key: Buffer): OAuthState
     const v = JSON.parse(decrypt(raw, key)) as Partial<OAuthState> | null;
     if (!v || typeof v !== 'object') return undefined;
     if (typeof v.provider !== 'string' || typeof v.state !== 'string' || typeof v.codeVerifier !== 'string' || typeof v.redirect !== 'string') return undefined;
+    if (typeof v.iat !== 'number' || !Number.isFinite(v.iat)) return undefined;
     if (v.nonce !== undefined && typeof v.nonce !== 'string') return undefined;
     if (v.linkUserId !== undefined && typeof v.linkUserId !== 'string') return undefined;
-    const out: OAuthState = { provider: v.provider, state: v.state, codeVerifier: v.codeVerifier, redirect: v.redirect };
+    const out: OAuthState = { provider: v.provider, state: v.state, codeVerifier: v.codeVerifier, redirect: v.redirect, iat: v.iat };
     if (v.nonce !== undefined) out.nonce = v.nonce;
     if (v.linkUserId !== undefined) out.linkUserId = v.linkUserId;
     return out;

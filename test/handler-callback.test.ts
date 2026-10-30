@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createAuth, type AuthConfig } from '../src/index.js';
-import { hashToken } from '../src/crypto.js';
+import { encrypt, decrypt, hashToken } from '../src/crypto.js';
 import { DuplicateIdentityError } from '../src/errors.js';
 import { fakeProvider } from './helpers/fake-provider.js';
 import { createMemoryStore, type MemoryStore, type MemoryTx } from './helpers/memory-store.js';
@@ -455,5 +455,57 @@ describe('GET /auth/:provider/callback', () => {
     const { auth } = setup({ google: prof('g1') }, { store: bad });
     const { res } = await flow(auth, 'google');
     expect(loc(res)).toBe(`${FRONT}/signin?error=sign_in_failed`);
+  });
+
+  describe('state cookie age (injected clock)', () => {
+    const T0 = 1_800_000_000_000;
+    const MAX = 10 * 60 * 1000;
+    /** Runs /start at T0, then the callback at T0 + `delta`; `mutate` rewrites the sealed state first. */
+    async function atAge(delta: number, mutate?: (s: Record<string, unknown>) => Record<string, unknown>) {
+      let now = T0;
+      const { auth } = setup({ google: prof('g1') }, { clock: () => new Date(now) });
+      const start = (await auth.handle(req('GET', '/auth/google/start')))!;
+      let value = setCookie(start, '__Host-ventrical_oauth')!.value;
+      if (mutate) value = encrypt(JSON.stringify(mutate(JSON.parse(decrypt(value, KEY)))), KEY);
+      const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
+      now = T0 + delta;
+      const res = (await auth.handle(req('GET', `/auth/google/callback?code=c&state=${encodeURIComponent(state)}`, { cookie: `__Host-ventrical_oauth=${encodeURIComponent(value)}` })))!;
+      return res;
+    }
+    const code = async (res: Response) => (await res.json() as any).error.code;
+
+    it('start seals iat from the injected clock', async () => {
+      const { auth } = setup({ google: prof('g1') }, { clock: () => new Date(T0) });
+      const start = (await auth.handle(req('GET', '/auth/google/start')))!;
+      expect(JSON.parse(decrypt(setCookie(start, '__Host-ventrical_oauth')!.value, KEY)).iat).toBe(T0);
+    });
+    it('a fresh state is accepted', async () => {
+      expect((await atAge(1000)).status).toBe(302);
+      expect(loc(await atAge(1000))).toContain('/');
+    });
+    it('exactly 10 minutes old is accepted (only strictly older than 10 minutes is rejected)', async () => {
+      const res = await atAge(MAX);
+      expect(res.status).toBe(302);
+      expect(sessionCookieOf(res)).toBeDefined();
+    });
+    it('10 minutes + 1 ms old is rejected with invalid_state', async () => {
+      const res = await atAge(MAX + 1);
+      expect(res.status).toBe(400);
+      expect(await code(res)).toBe('invalid_state');
+    });
+    it('a state with no iat is rejected', async () => {
+      const res = await atAge(0, ({ iat: _i, ...rest }) => rest);
+      expect(res.status).toBe(400);
+      expect(await code(res)).toBe('invalid_state');
+    });
+    it('a non-numeric iat is rejected', async () => {
+      expect(await code(await atAge(0, (s) => ({ ...s, iat: String(T0) })))).toBe('invalid_state');
+    });
+    it('an iat in the future is rejected, but equal to now is accepted', async () => {
+      const res = await atAge(0, (s) => ({ ...s, iat: T0 + 1 }));
+      expect(res.status).toBe(400);
+      expect(await code(res)).toBe('invalid_state');
+      expect((await atAge(0)).status).toBe(302);
+    });
   });
 });

@@ -140,6 +140,7 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
     const sealed = sealOAuthState({
       provider: provider.name, state, codeVerifier, nonce,
       redirect: safeRedirect(url.searchParams.get('redirect')),
+      iat: clock().getTime(),
       ...(session ? { linkUserId: session.user.id } : {}),
     }, config.encryptionKey);
     const headers = new Headers({ location: authUrl.toString(), 'cache-control': 'no-store' });
@@ -174,7 +175,9 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
     const provider = lookupProvider(name);
     const saved = openOAuthState(parseCookies(request.headers.get('cookie'))[cookieNames.oauth], config.encryptionKey);
     const state = url.searchParams.get('state') ?? '';
-    if (!saved || saved.provider !== provider.name || !sameString(saved.state, state)) {
+    // Strictly older than the cookie's life is stale (exactly at the limit still passes); a future iat is forged.
+    const age = saved ? clock().getTime() - saved.iat : 0;
+    if (!saved || age < 0 || age > OAUTH_STATE_MAX_AGE_SEC * 1000 || saved.provider !== provider.name || !sameString(saved.state, state)) {
       throw new AuthHttpError(400, 'invalid_state', 'Invalid or expired sign-in state');
     }
     const code = url.searchParams.get('code');

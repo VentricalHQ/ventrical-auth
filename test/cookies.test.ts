@@ -5,7 +5,7 @@ import {
 } from '../src/cookies.js';
 
 const key = Buffer.alloc(32, 9);
-const state: OAuthState = { provider: 'google', state: 's1', codeVerifier: 'v1', nonce: 'n1', redirect: '/x', linkUserId: 'u1' };
+const state: OAuthState = { provider: 'google', state: 's1', codeVerifier: 'v1', nonce: 'n1', redirect: '/x', linkUserId: 'u1', iat: 1_700_000_000_000 };
 
 describe('safeRedirect', () => {
   it('rejects open-redirect and control-character values', () => {
@@ -67,6 +67,10 @@ describe('oauth state', () => {
     expect(openOAuthState(sealed, Buffer.alloc(32, 1))).toBeUndefined();
     const bad = sealOAuthState({ provider: 'g' } as unknown as OAuthState, key);
     expect(openOAuthState(bad, key)).toBeUndefined();
+    for (const iat of [undefined, '5', null, NaN, Infinity]) {
+      const o = { ...state, iat } as unknown as OAuthState;
+      expect(openOAuthState(sealOAuthState(o, key), key)).toBeUndefined();
+    }
     const badNonce = sealOAuthState({ ...state, nonce: 5 } as unknown as OAuthState, key);
     expect(openOAuthState(badNonce, key)).toBeUndefined();
   });
