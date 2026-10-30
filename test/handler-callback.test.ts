@@ -113,7 +113,6 @@ describe('GET /auth/:provider/callback', () => {
     const { auth: auth3, store: store3 } = setup({ google: prof('ga'), github: prof('hx') });
     const sA = await signedIn(auth3, 'google');
     const start = (await auth3.handle(req('GET', '/auth/github/start', { cookie: sA })))!;
-    const { auth: _unused } = { auth: auth3 };
     const other = await store3.createUserWithIdentity({ provider: 'google', subject: 'gb', emailVerified: true });
     const sessOther = `ventrical_session=sess-other`;
     await store3.transaction((tx) => store3.createSessionUnlessSuspended(other.id, hashToken('sess-other'), new Date(Date.now() + 864e5), { provider: 'google', subject: 'gb' }, tx));

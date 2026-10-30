@@ -59,6 +59,10 @@ export type CanCreateResult = { allow: true } | { allow: false; reason: string }
 
 export interface AuthHooks<Tx = unknown> {
   canCreateAccount?(profile: ProviderProfile & { provider: ProviderName }): Promise<CanCreateResult>;
+  /**
+   * Runs inside the sign-in transaction. It may run twice if a duplicate-identity race
+   * retries the transaction, so side effects must be done through `tx`.
+   */
   afterSignIn?(ctx: {
     user: AuthUser;
     profile: ProviderProfile;
