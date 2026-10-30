@@ -12,6 +12,8 @@ import type { AuthConfig, AuthUser, ProviderName, ProviderProfile } from './type
 export const DEFAULT_COOKIE_NAMES = { session: 'ventrical_session', oauth: 'ventrical_oauth' } as const;
 
 export interface Auth {
+  /** The configured public base URL; adapters build request URLs from it, never from the Host header. */
+  readonly publicUrl: string;
   handle(request: Request): Promise<Response | undefined>;
   getSession(request: Request): Promise<SessionResult | undefined>;
   requireSession(request: Request): Promise<SessionResult>;
@@ -266,5 +268,5 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
     }
   }
 
-  return { handle, getSession: sessions.getSession, requireSession: sessions.requireSession };
+  return { publicUrl: config.publicUrl, handle, getSession: sessions.getSession, requireSession: sessions.requireSession };
 }
