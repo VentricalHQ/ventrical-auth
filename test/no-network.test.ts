@@ -52,6 +52,43 @@ describe('no-network guard', () => {
     }
   });
 
+  it('a port given as a number or a numeric string is checked against the host', () => {
+    const attempt = (port: number | string, host: string) => {
+      let sock: net.Socket | undefined;
+      try {
+        sock = new net.Socket().connect(port as never, host);
+        sock.on('error', () => {});
+        return 'connected';
+      } catch (e) {
+        return (e as Error).message;
+      } finally {
+        sock?.destroy();
+      }
+    };
+    expect(attempt(5432, '203.0.113.9')).toMatch(BLOCKED);
+    expect(attempt('5432', '203.0.113.9')).toMatch(BLOCKED);
+    expect(attempt('5432', 'db.example.test')).toMatch(BLOCKED);
+    expect(attempt(' 80', 'example.com')).toMatch(BLOCKED);
+  });
+
+  it('a numeric-string port to loopback is allowed, and a real path is still a unix socket', async () => {
+    const server = net.createServer((c) => c.end());
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as AddressInfo).port;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const s = new net.Socket();
+        s.on('error', reject);
+        s.connect(String(port) as never, '127.0.0.1', () => { s.destroy(); resolve(); });
+      });
+      const s2 = new net.Socket();
+      s2.connect('/nonexistent/ventrical-test.sock');
+      await new Promise<void>((resolve) => { s2.on('error', (e) => { expect(e.message).not.toMatch(BLOCKED); resolve(); }); });
+    } finally {
+      await new Promise<void>((r) => { server.close(() => r()); });
+    }
+  });
+
   it('allows loopback names and ranges, blocks look-alikes', () => {
     for (const h of ['127.0.0.1', '127.1.2.3', '::1', '[::1]', 'localhost', 'LOCALHOST', 'app.localhost', '::ffff:127.0.0.1']) {
       expect(isAllowedHost(h), h).toBe(true);

@@ -49,6 +49,9 @@ globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters
 }) as typeof fetch;
 
 // Socket-level connects (net.connect, http, https, pg): unix-socket paths are local; anything else needs an allowed host.
+/** Same rule as Node's net: a string that parses as a non-negative number is a port, anything else is a pipe path. */
+const isPortLike = (s: string): boolean => Number(s) >= 0;
+
 const realConnect = net.Socket.prototype.connect;
 net.Socket.prototype.connect = function patchedConnect(this: net.Socket, ...args: unknown[]) {
   // Node passes either (options | port, host | path) or the already-normalized array [options, cb].
@@ -58,7 +61,7 @@ net.Socket.prototype.connect = function patchedConnect(this: net.Socket, ...args
     const o = first as { host?: string; path?: string };
     if (o.path !== undefined) return (realConnect as (...a: unknown[]) => net.Socket).apply(this, args);
     host = o.host;
-  } else if (typeof first === 'string') {
+  } else if (typeof first === 'string' && !isPortLike(first)) {
     return (realConnect as (...a: unknown[]) => net.Socket).apply(this, args); // a unix-socket path
   } else {
     host = typeof args[1] === 'string' ? args[1] : undefined;
