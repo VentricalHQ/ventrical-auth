@@ -4,7 +4,7 @@ OIDC sign-in for Ventrical services: Google, Microsoft and GitHub, with the secu
 
 > **Experimental (0.0.x): not yet recommended for production.** The API and the store contract may change between releases. Read [Security notes](#security-notes) before using it, and report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
-Status: version 0.1.0 is being prepared. **No git tag exists yet and nothing is published.** See [Release](#release).
+Status: experimental. Releases are cut automatically from `main` (see [Release](#release)); until the first release exists, nothing is published.
 
 Requirements: Node 22 or newer, ESM only. `openid-client` is pinned to exactly 6.8.8.
 
@@ -25,10 +25,10 @@ Requirements: Node 22 or newer, ESM only. `openid-client` is pinned to exactly 6
 ## Install
 
 ```json
-"@ventrical/auth": "github:VentricalHQ/ventrical-auth#v0.1.0"
+"@ventrical/auth": "^0.0.1"
 ```
 
-The package builds itself on install (`prepare` runs `npm run build`). Consumers need access to the private repository. TypeScript consumers of the Express adapter also need `@types/express` (the adapter exports Express types), and consumers of `@ventrical/auth/pg` need `@types/pg` (the store's signature uses `pg` types). Express 5, Next (>=14), Hono 4 and Fastify 5 are optional peer dependencies, needed only for the matching entry point; install just the one you use. The Next adapter uses plain `Request` and `Response` and never imports `next` (not even as a type); the Hono and Fastify adapters import their framework as types only. `pg` is a regular dependency.
+From npm the package ships prebuilt (`dist`). Until the first release exists you can install from git instead (`"@ventrical/auth": "github:VentricalHQ/ventrical-auth#staging"`, needs repository access); a git install builds itself because `prepare` runs `npm run build`. TypeScript consumers of the Express adapter also need `@types/express` (the adapter exports Express types), and consumers of `@ventrical/auth/pg` need `@types/pg` (the store's signature uses `pg` types). Express 5, Next (>=14), Hono 4 and Fastify 5 are optional peer dependencies, needed only for the matching entry point; install just the one you use. The Next adapter uses plain `Request` and `Response` and never imports `next` (not even as a type); the Hono and Fastify adapters import their framework as types only. `pg` is a regular dependency.
 
 Entry points:
 
@@ -363,13 +363,29 @@ The code was extracted, by copying, from the Kagaya backend's sign-in code (rout
 
 ## Release
 
-There is no release automation, no CI workflow, and **no tag has been created**. The maintainers tag `v0.1.0` when ready; the step is:
+Releases are automatic. Merging into `main` runs CI, then [semantic-release](https://github.com/semantic-release/semantic-release) reads the commits since the last tag, picks the next version, tags it, creates a GitHub release with notes generated from the commits, and publishes `@ventrical/auth` to npm with provenance. There is no manual tagging.
 
-```sh
-git tag v0.1.0
-```
+Work lands on `staging` (CI runs on every push and PR), and a PR from `staging` into `main` makes a release. **Merge it with a merge commit, not a squash**, so the individual commit messages reach the release.
 
-(then pushing the tag), after which consumers install it with the line shown under [Install](#install): `"@ventrical/auth": "github:VentricalHQ/ventrical-auth#v0.1.0"`. Until that tag exists the install line does not resolve. The package is not published to npm; that waits until it goes open source (the license is Apache-2.0).
+### Commit messages decide the version
+
+Use conventional commits: `feat:`, `fix:`, `perf:`, `revert:` produce a release, and `docs:`, `test:`, `chore:`, `refactor:` do not. While the package is `0.x`, the release rules are capped so that it stays there:
+
+| Commit | Release while `0.x` |
+|---|---|
+| `fix:`, `feat:`, `perf:`, `revert:` | patch (0.0.1, 0.0.2, ...) |
+| a breaking change (`feat!:` or a `BREAKING CHANGE:` footer) | minor (0.1.0, 0.2.0, ...) |
+
+To reach `1.0.0`, remove the `releaseRules` from `.releaserc.json` and make the commit that declares the interface stable a breaking change.
+
+### One-time setup (maintainers)
+
+1. **Baseline tag.** semantic-release makes `1.0.0` when there is no earlier tag. Create `v0.0.0` on the repository's first commit, and push it: `git tag v0.0.0 $(git rev-list --max-parents=0 main) && git push origin v0.0.0`. The first release then becomes `0.0.1`.
+2. **npm, with no token.** The `@ventrical` organization must exist and `ventricalhq` must have 2FA on. Trusted publishing is configured on an existing package, so publish the first version by hand once: `npm login` as `ventricalhq`, then `npm publish` in this repository (it publishes `0.0.0`, matching the baseline tag; that one version has no provenance). Then, in the package's settings on npmjs.com, add a trusted publisher: GitHub Actions, owner `VentricalHQ`, repository `ventrical-auth`, workflow filename `release.yml`. npm does not validate this when you save it, and the configuration must complete a successful publish within 2 days, so do it right before the first merge to `main`. From then on every release is published by the workflow, with provenance, and no npm token exists anywhere.
+3. **Repository settings.** Protect `main` (require the CI check and a PR from `staging`), allow GitHub Actions to create releases and tags (Settings, Actions, Workflow permissions: read and write), and turn on private vulnerability reporting (Settings, Code security).
+4. **Dependabot** is configured in `.github/dependabot.yml` and opens PRs against `staging`.
+
+Consumers install from npm: `npm install @ventrical/auth`.
 
 ## Not in v0.1
 
