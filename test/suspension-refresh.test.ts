@@ -135,7 +135,7 @@ function suite(name: string, make: () => Promise<Harness>) {
       } finally { await h.close?.(); }
     });
 
-    it('sign-in: a returning user whose own row is the only match is not blocked', async () => {
+    it('sign-in: a returning user sharing a verified email with an unsuspended twin signs in normally', async () => {
       const { h, auth } = await twin();
       try {
         const res = await flow(auth, 'github');
@@ -178,6 +178,68 @@ function suite(name: string, make: () => Promise<Harness>) {
         const res = await flow(auth, 'github');
         expect(res.headers.get('location')).toBe(`${FRONT}/`);
         expect(setCookie(res, '__Host-ventrical_session')).toBeDefined();
+      } finally { await h.close?.(); }
+    });
+
+    it('sign-in: a new identity whose verified email belongs to a suspended user is refused and creates nothing', async () => {
+      const { h, e1, errors } = await world();
+      try {
+        const fresh = setup({ google: { subject: 'g-fresh', email: e1, emailVerified: true } }, h.store, errors);
+        errors.length = 0;
+        const res = await flow(fresh, 'google');
+        expect(res.headers.get('location')).toBe(`${FRONT}/signin?error=suspended`);
+        expect(setCookie(res, '__Host-ventrical_session')).toBeUndefined();
+        expect(await h.store.findUserByIdentity('google', 'g-fresh')).toBeUndefined();
+        expect(errors).toContainEqual({ stage: 'callback', code: 'suspended' });
+      } finally { await h.close?.(); }
+    });
+
+    it('a profile email with stray whitespace and case is stored normalised and matches a suspended mixed-case email', async () => {
+      const h = await make();
+      try {
+        const a = setup({ google: { subject: 'g-a', email: 'ANN@example.test', emailVerified: true } }, h.store);
+        await flow(a, 'google');
+        expect(await identityOf(h.store, 'google', 'g-a')).toEqual({ email: 'ann@example.test', emailVerified: true });
+        await h.suspend(await userId(h.store, 'google', 'g-a'));
+        const b = setup({ github: { subject: 'h-b', email: ' Ann@Example.test ', emailVerified: true } }, h.store);
+        const res = await flow(b, 'github');
+        expect(res.headers.get('location')).toBe(`${FRONT}/signin?error=suspended`);
+        expect(await h.store.findUserByIdentity('github', 'h-b')).toBeUndefined();
+        const c = setup({ github: { subject: 'h-c', email: ' Fresh@Example.test ', emailVerified: true } }, h.store);
+        await flow(c, 'github');
+        expect(await identityOf(h.store, 'github', 'h-c')).toEqual({ email: 'fresh@example.test', emailVerified: true });
+        expect((await h.store.findUserByIdentity('github', 'h-c'))!.email).toBe('fresh@example.test');
+      } finally { await h.close?.(); }
+    });
+
+    it('a returning sign-in whose email differs only by case or whitespace does not rewrite the identity', async () => {
+      const h = await make();
+      try {
+        const gh: ProviderProfile = { subject: 'h-r', email: 'r@example.test', emailVerified: true };
+        const auth = setup({ github: gh }, h.store);
+        await flow(auth, 'github');
+        const calls: unknown[] = [];
+        const orig = h.store.updateIdentity!.bind(h.store);
+        h.store.updateIdentity = (...args) => { calls.push(args); return orig(...args); };
+        gh.email = '  R@Example.TEST ';
+        expect((await flow(auth, 'github')).headers.get('location')).toBe(`${FRONT}/`);
+        expect(calls).toEqual([]);
+        expect(await identityOf(h.store, 'github', 'h-r')).toEqual({ email: 'r@example.test', emailVerified: true });
+      } finally { await h.close?.(); }
+    });
+
+    it('a profile email that is empty after trimming counts as no email', async () => {
+      const h = await make();
+      try {
+        const seen: (string | undefined)[] = [];
+        const orig = h.store.emailBelongsToSuspendedUser.bind(h.store);
+        h.store.emailBelongsToSuspendedUser = (email, tx, opts) => { seen.push(email); return orig(email, tx, opts); };
+        const auth = setup({ github: { subject: 'h-e', email: '   ', emailVerified: true } }, h.store);
+        expect((await flow(auth, 'github')).headers.get('location')).toBe(`${FRONT}/`);
+        expect(seen).toEqual([]);
+        const u = (await h.store.findUserByIdentity('github', 'h-e'))!;
+        expect(u.email).toBeNull();
+        expect(u.identity?.email ?? null).toBeNull();
       } finally { await h.close?.(); }
     });
 

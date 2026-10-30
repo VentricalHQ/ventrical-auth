@@ -4,6 +4,7 @@ import {
   serializeCookie, type CookieOptions,
 } from './cookies.js';
 import { hashToken } from './crypto.js';
+import { normalizeEmail } from './email.js';
 import { AuthHttpError, DuplicateIdentityError } from './errors.js';
 import { PROVIDER_ORDER, createProviders, issOf, type AuthProvider } from './providers.js';
 import { SESSION_TTL_MS, makeSessions, newSessionId, type SessionResult } from './session.js';
@@ -196,9 +197,11 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
       await report(ctx.stage, 'exchange_failed', provider.name, err);
       return errorResponse(new AuthHttpError(400, 'oauth_error', 'Sign-in failed'));
     }
+    // Normalised once (trim, then lowercase) before any comparison or storage; empty after trimming means no email.
+    const email = raw.email !== undefined ? normalizeEmail(raw.email) : undefined;
     const profile: ProviderProfile = {
       subject: raw.subject, emailVerified: raw.emailVerified === true,
-      ...(raw.email !== undefined ? { email: raw.email } : {}),
+      ...(email !== undefined ? { email } : {}),
       ...(raw.name !== undefined ? { name: raw.name } : {}),
     };
     const target = resolveTarget(saved.redirect);

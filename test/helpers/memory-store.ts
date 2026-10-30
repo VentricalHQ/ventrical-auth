@@ -23,6 +23,8 @@ export function createMemoryStore(clock: () => Date = () => new Date()): MemoryS
   // Transactions run one at a time (like row-level conflicts would force), so a rollback snapshot never erases a concurrent commit.
   let queue: Promise<unknown> = Promise.resolve();
 
+  // Mirrors the pg store: trim, then lowercase; empty after trimming is no email.
+  const norm = (e: string | null | undefined): string | undefined => (e == null || e.trim() === '' ? undefined : e.trim().toLowerCase());
   const publicUser = (u: StoredUser): AuthUser => ({ id: u.id, email: u.email, name: u.name });
   const isSuspended = (userId: string) => users.get(userId)?.suspended === true;
 
@@ -63,26 +65,29 @@ export function createMemoryStore(clock: () => Date = () => new Date()): MemoryS
     async createUserWithIdentity(p) {
       if (identities.some((x) => x.provider === p.provider && x.subject === p.subject)) throw new DuplicateIdentityError();
       const id = `u${++seq}`;
-      const user: StoredUser = { id, email: p.email ?? null, name: p.name ?? null, suspended: false };
+      const user: StoredUser = { id, email: norm(p.email) ?? null, name: p.name ?? null, suspended: false };
       users.set(id, user);
-      identities.push({ provider: p.provider, subject: p.subject, ...(p.email !== undefined ? { email: p.email } : {}), emailVerified: p.emailVerified, userId: id });
+      identities.push({ provider: p.provider, subject: p.subject, ...(norm(p.email) !== undefined ? { email: norm(p.email)! } : {}), emailVerified: p.emailVerified, userId: id });
       return publicUser(user);
     },
     async linkIdentity(userId, identity) {
       if (!users.has(userId)) throw new Error('foreign key violation: unknown user'); // like Postgres, not a DuplicateIdentityError
       if (identities.some((x) => x.provider === identity.provider && x.subject === identity.subject)) throw new DuplicateIdentityError();
-      identities.push({ ...identity, userId });
+      const { email: _raw, ...rest } = identity;
+      identities.push({ ...rest, ...(norm(identity.email) !== undefined ? { email: norm(identity.email)! } : {}), userId });
     },
     async updateIdentity(provider, subject, update) {
       const i = identities.find((x) => x.provider === provider && x.subject === subject);
       if (!i) return;
-      if (update.email === null) delete i.email;
-      else if (update.email !== undefined) i.email = update.email;
+      if (update.email !== undefined) {
+        const e = norm(update.email);
+        if (e === undefined) delete i.email; else i.email = e;
+      }
       i.emailVerified = update.emailVerified;
     },
     async emailBelongsToSuspendedUser(email, _tx, opts) {
-      const e = email.toLowerCase();
-      return identities.some((i) => i.userId !== opts?.exceptUserId && i.emailVerified && i.email?.toLowerCase() === e && isSuspended(i.userId));
+      const e = norm(email);
+      return e !== undefined && identities.some((i) => i.userId !== opts?.exceptUserId && i.emailVerified && norm(i.email) === e && isSuspended(i.userId));
     },
     async createSessionUnlessSuspended(userId, idHash, expiresAt, identity) {
       if (!users.has(userId) || isSuspended(userId)) return false; // unknown user: refused, as the pg store does

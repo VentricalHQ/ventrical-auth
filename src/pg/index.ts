@@ -2,12 +2,15 @@ import { fileURLToPath } from 'node:url';
 import type pg from 'pg';
 import { ulid } from 'ulid';
 import { DuplicateIdentityError } from '../errors.js';
+import { normalizeEmail } from '../email.js';
 import type { AuthStore, AuthUser, NewIdentity } from '../types.js';
 
 /** Absolute path of the shipped SQL migrations (`001_auth.sql`, ...). Apply them in file-name order. */
 export const migrationsDir: string = fileURLToPath(new URL('./migrations', import.meta.url));
 
 type Queryable = pg.Pool | pg.PoolClient;
+
+const normOrNull = (email: string | null | undefined): string | null => (email == null ? null : normalizeEmail(email) ?? null);
 
 const toUser = (r: { id: string; email: string | null; name: string | null }): AuthUser => ({ id: r.id, email: r.email, name: r.name });
 
@@ -21,7 +24,7 @@ async function insertIdentity(db: Queryable, userId: string, p: NewIdentity): Pr
   try {
     await db.query(
       'insert into identities (provider, subject, user_id, email, email_verified) values ($1, $2, $3, $4, $5)',
-      [p.provider, p.subject, userId, p.email ?? null, p.emailVerified],
+      [p.provider, p.subject, userId, normOrNull(p.email), p.emailVerified],
     );
   } catch (err) {
     if (isDuplicateIdentity(err)) throw new DuplicateIdentityError();
@@ -77,9 +80,10 @@ export function pgAuthStore(pool: pg.Pool): AuthStore<pg.PoolClient> {
       const id = ulid();
       const q = db(tx);
       // Identity first would break the FK; the user insert cannot collide, so a 23505 here is the identity's.
-      await q.query('insert into users (id, email, name) values ($1, $2, $3)', [id, p.email ?? null, p.name ?? null]);
+      const email = normOrNull(p.email);
+      await q.query('insert into users (id, email, name) values ($1, $2, $3)', [id, email, p.name ?? null]);
       await insertIdentity(q, id, p);
-      return { id, email: p.email ?? null, name: p.name ?? null };
+      return { id, email, name: p.name ?? null };
     },
 
     async linkIdentity(userId, identity, tx) {
@@ -97,7 +101,7 @@ export function pgAuthStore(pool: pg.Pool): AuthStore<pg.PoolClient> {
       } else {
         await db(tx).query(
           'update identities set email = $3, email_verified = $4 where provider = $1 and subject = $2',
-          [provider, subject, update.email, update.emailVerified],
+          [provider, subject, normOrNull(update.email), update.emailVerified],
         );
       }
     },
@@ -107,9 +111,9 @@ export function pgAuthStore(pool: pg.Pool): AuthStore<pg.PoolClient> {
       // With a tx, lock every matching user row (suspended or not) so a suspension cannot commit before we do.
       const r = await db(tx).query(
         `select u.suspended_at from users u join identities i on i.user_id = u.id
-         where i.email_verified and lower(i.email) = lower($1)
+         where i.email_verified and lower(btrim(i.email)) = $1
            and ($2::text is null or u.id <> $2)${tx ? ' for share of u' : ''}`,
-        [email, opts?.exceptUserId ?? null],
+        [normalizeEmail(email) ?? null, opts?.exceptUserId ?? null],
       );
       return r.rows.some((row) => row.suspended_at !== null);
     },

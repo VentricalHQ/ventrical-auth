@@ -46,7 +46,7 @@ export interface AuthStore<Tx = unknown> {
   createUserWithIdentity(p: NewIdentity & { name?: string }, tx?: Tx): Promise<AuthUser>;
   linkIdentity(userId: string, identity: NewIdentity, tx?: Tx): Promise<void>;
   /**
-   * Verified identity emails only, case-insensitive. When given a tx it must hold FOR SHARE (or an equivalent lock)
+   * Verified identity emails only; the argument is trimmed and lowercased before comparing. When given a tx it must hold FOR SHARE (or an equivalent lock)
    * on the matching user rows, so a suspension cannot slip in before the transaction commits.
    * With `opts.exceptUserId`, that user's own rows are ignored (a user is never blocked by their own suspension
    * here); the other matching rows are still locked.

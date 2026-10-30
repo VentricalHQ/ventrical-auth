@@ -42,7 +42,7 @@ export function storeContract(name: string, make: () => Promise<StoreHarness>): 
       const { store } = await fresh();
       await store.createUserWithIdentity({ ...IDENT, email: 'Ann@Example.test', emailVerified: true });
       await store.createUserWithIdentity({ provider: 'github', subject: 'h1', emailVerified: false });
-      expect((await store.findUserByIdentity('google', 'g1'))?.identity).toEqual({ email: 'Ann@Example.test', emailVerified: true });
+      expect((await store.findUserByIdentity('google', 'g1'))?.identity).toEqual({ email: 'ann@example.test', emailVerified: true });
       const bare = (await store.findUserByIdentity('github', 'h1'))?.identity;
       expect(bare?.emailVerified).toBe(false);
       expect(bare?.email ?? null).toBeNull();
@@ -226,12 +226,37 @@ export function storeContract(name: string, make: () => Promise<StoreHarness>): 
       expect(await store.emailBelongsToSuspendedUser('new@example.test')).toBe(false);
     });
 
-    it('updateIdentity keeps a mixed-case email matchable case-insensitively', async () => {
+    it('createUserWithIdentity and linkIdentity store the email trimmed and lowercased (users.email too)', async () => {
+      const { store } = await fresh();
+      const user = await store.createUserWithIdentity({ ...IDENT, email: '  Ann@Example.test\t', emailVerified: true });
+      expect(user.email).toBe('ann@example.test');
+      expect((await store.findUserByIdentity('google', 'g1'))).toEqual({ ...user, identity: { email: 'ann@example.test', emailVerified: true } });
+      await store.linkIdentity(user.id, { provider: 'github', subject: 'h1', email: ' BOB@Example.TEST ', emailVerified: true });
+      expect((await store.findUserByIdentity('github', 'h1'))?.identity).toEqual({ email: 'bob@example.test', emailVerified: true });
+    });
+
+    it('an email that is empty after trimming is stored as no email', async () => {
+      const { store } = await fresh();
+      const user = await store.createUserWithIdentity({ ...IDENT, email: '   ', emailVerified: true });
+      expect(user.email).toBeNull();
+      expect((await store.findUserByIdentity('google', 'g1'))?.identity?.email ?? null).toBeNull();
+    });
+
+    it('emailBelongsToSuspendedUser trims and lowercases its argument', async () => {
+      const { store, suspend } = await fresh();
+      const user = await store.createUserWithIdentity({ ...IDENT, email: 'Person@Example.test', emailVerified: true });
+      await suspend(user.id);
+      expect(await store.emailBelongsToSuspendedUser('  PERSON@Example.test \n')).toBe(true);
+      expect(await store.emailBelongsToSuspendedUser('   ')).toBe(false);
+    });
+
+    it('updateIdentity stores the email trimmed and lowercased and it stays matchable', async () => {
       const { store, suspend } = await fresh();
       if (!store.updateIdentity) throw new Error('updateIdentity missing');
       const user = await store.createUserWithIdentity({ ...IDENT, email: 'old@example.test', emailVerified: true });
       await suspend(user.id);
-      await store.updateIdentity('google', 'g1', { email: 'New@Example.test', emailVerified: true });
+      await store.updateIdentity('google', 'g1', { email: ' New@Example.test ', emailVerified: true });
+      expect((await store.findUserByIdentity('google', 'g1'))?.identity).toEqual({ email: 'new@example.test', emailVerified: true });
       expect(await store.emailBelongsToSuspendedUser('new@example.test')).toBe(true);
       expect(await store.emailBelongsToSuspendedUser('NEW@EXAMPLE.TEST')).toBe(true);
       expect(await store.emailBelongsToSuspendedUser('old@example.test')).toBe(false);
