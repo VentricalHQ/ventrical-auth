@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createProviders, fetchGithubProfile, googleProfile, issOf, microsoftProfile, PROVIDER_ORDER } from '../src/providers.js';
-import { fakeIdp } from './helpers/fake-fetch.js';
+import { fakeIdp, type SignOptions } from './helpers/fake-fetch.js';
 
 const providers = {
   google: { clientId: 'gid', clientSecret: 'gs' },
@@ -257,4 +257,41 @@ describe('ventrical-auth additions', () => {
     expect(String((err as Error).message)).not.toContain('LEAKBODY');
     await expect(p.authorizeUrl('s', VERIFIER, 'n')).resolves.toBeInstanceOf(URL);
   });
+});
+
+describe('RFC 9207 duplicate iss', () => {
+  it('issOf rejects repeated iss', () => {
+    expect(issOf(new URLSearchParams('?iss=a&iss=b'))).toEqual({});
+    expect(issOf(new URLSearchParams('?iss=a&iss=a'))).toEqual({});
+  });
+  it('a duplicated iss fails the callback when the provider advertises iss', async () => {
+    const idp = await fakeIdp(G_ISSUER, `${G_ISSUER}/.well-known/openid-configuration`, { authorization_response_iss_parameter_supported: true });
+    await idp.sign({ iss: G_ISSUER, aud: 'gid', sub: 'g1', nonce: 'nn' });
+    const p = mk(idp.fetchFn).google!;
+    const q = new URLSearchParams(`iss=${encodeURIComponent(G_ISSUER)}&iss=${encodeURIComponent(G_ISSUER)}`);
+    await expect(p.exchange('c', VERIFIER, { ...ctx, ...issOf(q) })).rejects.toThrow();
+    await expect(p.exchange('c', VERIFIER, { ...ctx, ...issOf(new URLSearchParams(`iss=${encodeURIComponent(G_ISSUER)}`)) })).resolves.toMatchObject({ subject: 'g1' });
+  });
+});
+
+describe('ID token signature and lifetime failures', () => {
+  const MS_ISS = 'https://login.microsoftonline.com/tid1/v2.0';
+  const cases: Array<[string, SignOptions]> = [
+    ['signed with a different key', { wrongKey: true }],
+    ['payload tampered after signing', { tamper: true }],
+    ['alg none', { alg: 'none' }],
+    ['expired', { expired: true }],
+  ];
+  for (const [label, opts] of cases) {
+    it(`google rejects a token ${label}`, async () => {
+      const idp = await fakeIdp(G_ISSUER, `${G_ISSUER}/.well-known/openid-configuration`);
+      await idp.sign({ iss: G_ISSUER, aud: 'gid', sub: 'g1', nonce: 'nn' }, opts);
+      await expect(mk(idp.fetchFn).google!.exchange('c', VERIFIER, ctx)).rejects.toThrow();
+    });
+    it(`microsoft rejects a token ${label}`, async () => {
+      const idp = await fakeIdp(MS_ISSUER, MS_DISCOVERY);
+      await idp.sign({ iss: MS_ISS, tid: 'tid1', aud: 'mid', sub: 'm1', nonce: 'nn' }, opts);
+      await expect(mk(idp.fetchFn).microsoft!.exchange('c', VERIFIER, ctx)).rejects.toThrow();
+    });
+  }
 });

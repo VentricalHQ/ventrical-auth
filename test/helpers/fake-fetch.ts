@@ -2,6 +2,17 @@ import { createSign, generateKeyPairSync } from 'node:crypto';
 
 const b64u = (b: Buffer | string): string => Buffer.from(b).toString('base64url');
 
+export interface SignOptions {
+  /** Sign with a key the JWKS does not publish. */
+  wrongKey?: boolean;
+  /** Change the payload after signing. */
+  tamper?: boolean;
+  /** Unsigned token with alg none. */
+  alg?: 'none';
+  /** Issue a token whose exp is in the past. */
+  expired?: boolean;
+}
+
 /** Minimal offline IdP: discovery, JWKS and token endpoint served through an injected fetch; ID tokens signed with a throwaway RSA key. */
 export async function fakeIdp(issuerTemplate: string, discoveryUrl: string, extraDiscovery: Record<string, unknown> = {}) {
   const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -26,12 +37,16 @@ export async function fakeIdp(issuerTemplate: string, discoveryUrl: string, extr
     }
     throw new Error(`unexpected fetch ${url}`);
   }) as typeof fetch;
-  const sign = async (claims: Record<string, unknown>): Promise<void> => {
+  const other = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey;
+  const sign = async (claims: Record<string, unknown>, opts: SignOptions = {}): Promise<void> => {
     const now = Math.floor(Date.now() / 1000);
-    const head = b64u(JSON.stringify({ alg: 'RS256', kid: 'k1', typ: 'JWT' }));
-    const body = b64u(JSON.stringify({ iat: now, exp: now + 300, ...claims }));
-    const sig = createSign('RSA-SHA256').update(`${head}.${body}`).sign(privateKey);
-    idToken = `${head}.${body}.${b64u(sig)}`;
+    const head = b64u(JSON.stringify({ alg: opts.alg === 'none' ? 'none' : 'RS256', kid: 'k1', typ: 'JWT' }));
+    const exp = opts.expired ? now - 3600 : now + 300;
+    const body = b64u(JSON.stringify({ iat: now - (opts.expired ? 7200 : 0), exp, ...claims }));
+    if (opts.alg === 'none') { idToken = `${head}.${body}.`; return; }
+    const sig = createSign('RSA-SHA256').update(`${head}.${body}`).sign(opts.wrongKey ? other : privateKey);
+    const finalBody = opts.tamper ? b64u(JSON.stringify({ iat: now, exp, ...claims, sub: 'attacker' })) : body;
+    idToken = `${head}.${finalBody}.${b64u(sig)}`;
   };
   return { fetchFn, sign, tokenBodies };
 }

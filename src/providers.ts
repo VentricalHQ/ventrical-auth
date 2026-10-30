@@ -4,10 +4,10 @@ import type { AuthConfig, ProviderName, ProviderProfile } from './types.js';
 /** Saved at /start, plus the callback's `iss` (RFC 9207) when present; Google and others require it when their discovery advertises it. */
 export interface ExchangeCtx { state: string; nonce: string; iss?: string }
 
-/** The callback's `iss` as an optional ctx field; omitted (not undefined) when absent. */
+/** The callback's `iss` as an optional ctx field; omitted (not undefined) when absent or repeated (RFC 9207). */
 export const issOf = (query: URLSearchParams): { iss?: string } => {
-  const iss = query.get('iss');
-  return iss === null ? {} : { iss };
+  const all = query.getAll('iss');
+  return all.length === 1 ? { iss: all[0]! } : {};
 };
 
 export interface AuthProvider {
