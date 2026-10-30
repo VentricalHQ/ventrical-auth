@@ -81,6 +81,27 @@ function suite(name: string, make: () => Promise<Harness>) {
       } finally { await h.close?.(); }
     });
 
+    it('the in-transaction check alone refuses a first-time sign-in whose email belongs to a suspended user', async () => {
+      const h = await make();
+      try {
+        let hooks = 0;
+        const first = setup(profile(), h.store, async () => { hooks++; });
+        await flow(first);
+        await h.suspend((await h.store.findUserByIdentity('google', 'g1'))!.id);
+        const sessions = await h.sessionCount();
+        // The pre-check (no tx) misses the suspension, as if it landed afterwards; only the locked in-tx check can catch it.
+        const orig = h.store.emailBelongsToSuspendedUser.bind(h.store);
+        h.store.emailBelongsToSuspendedUser = (email, tx, opts) => (tx ? orig(email, tx, opts) : Promise.resolve(false));
+        const fresh = setup({ subject: 'g2', email: 'g1@example.test', emailVerified: true }, h.store, async () => { hooks++; });
+        const res = await flow(fresh);
+        expect(res.headers.get('location')).toBe(`${FRONT}/signin?error=suspended`);
+        expect(setCookie(res, '__Host-ventrical_session')).toBeUndefined();
+        expect(hooks).toBe(1);
+        expect(await h.store.findUserByIdentity('google', 'g2')).toBeUndefined();
+        expect(await h.sessionCount()).toBe(sessions);
+      } finally { await h.close?.(); }
+    });
+
     it('a throwing hook leaves no user and no session row', async () => {
       const h = await make();
       try {
