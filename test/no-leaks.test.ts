@@ -59,6 +59,25 @@ function base(over: Partial<AuthConfig<MemoryTx>> = {}) {
   return { auth, store };
 }
 
+const EVENT_KEYS = ['stage', 'code', 'provider', 'errorName'];
+/** A failed code exchange: a bare 400 oauth_error (no redirect, no session), one exchange_failed event, only whitelisted fields. */
+async function expectExchangeFailed(cb: Response, provider: string): Promise<void> {
+  expect(cb.status).toBe(400);
+  expect(cb.headers.get('location')).toBeNull();
+  expect(await cb.clone().json()).toEqual({ error: { code: 'oauth_error', message: 'Sign-in failed' } });
+  expect(setCookie(cb, 'ventrical_session')).toBeUndefined();
+  expect(errorEvents).toEqual([{ stage: 'callback', code: 'exchange_failed', provider, errorName: expect.any(String) }]);
+  expect(Object.keys(errorEvents[0] as object).every((k) => EVENT_KEYS.includes(k))).toBe(true);
+}
+
+/** A sign-in that failed after the exchange: a 302 to the frontend sign-in page with the exact error code. */
+async function expectSigninRedirect(cb: Response, code: string, provider: string): Promise<void> {
+  expect(cb.status).toBe(302);
+  expect(cb.headers.get('location')).toBe(`${FRONT}/signin?error=${code}`);
+  expect(setCookie(cb, 'ventrical_session')).toBeUndefined();
+  expect(errorEvents).toEqual([expect.objectContaining({ stage: 'callback', code, provider })]);
+}
+
 type Auth = ReturnType<typeof base>['auth'];
 
 async function start(auth: Auth, provider: string) {
@@ -93,14 +112,14 @@ describe('planted secret never leaves (provider override)', () => {
 
   it('failing callback: a provider error carrying the planted string', async () => {
     const { s, cb } = await run(new Error(`upstream said code=${PLANT} token=${PLANT} secret=${PLANT}`));
-    expect(cb.status).toBe(400);
+    await expectExchangeFailed(cb, 'google');
     await expectNoLeak('thrown provider error', s.res, cb);
   });
 
   it('failing callback: an error whose own properties carry the plant', async () => {
     const err = Object.assign(new Error('failed'), { body: PLANT, cause: new Error(PLANT), response: { text: PLANT } });
     const { s, cb } = await run(err);
-    expect(cb.status).toBe(400);
+    await expectExchangeFailed(cb, 'google');
     await expectNoLeak('error properties', s.res, cb);
   });
 
@@ -124,6 +143,7 @@ describe('planted secret never leaves (provider override)', () => {
     const { auth } = base({ store: failing, providerOverrides: { google: fakeProvider('google', ok()) } as never });
     const s = await start(auth, 'google');
     const cb = await callback(auth, 'google', s);
+    await expectSigninRedirect(cb, 'sign_in_failed', 'google');
     await expectNoLeak('store error', s.res, cb);
   });
 
@@ -152,8 +172,7 @@ describe('planted secret never leaves (provider override)', () => {
     });
     const s = await start(auth, 'google');
     const cb = await callback(auth, 'google', s);
-    expect(cb.status).toBe(302);
-    expect(cb.headers.get('location')).toContain('error=sign_in_failed');
+    await expectSigninRedirect(cb, 'sign_in_failed', 'google');
     await expectNoLeak('hook error', s.res, cb);
   });
 });
@@ -174,7 +193,7 @@ describe('planted secret never leaves (github over a fake fetch)', () => {
     const { auth } = base({ fetch: ghFetch({ tokenStatus: 400 }) });
     const s = await start(auth, 'github');
     const cb = await callback(auth, 'github', s);
-    expect(cb.status).toBe(400);
+    await expectExchangeFailed(cb, 'github');
     await expectNoLeak('github token error', s.res, cb);
   });
 
@@ -182,7 +201,7 @@ describe('planted secret never leaves (github over a fake fetch)', () => {
     const { auth } = base({ fetch: ghFetch({ userStatus: 500 }) });
     const s = await start(auth, 'github');
     const cb = await callback(auth, 'github', s);
-    expect(cb.status).toBe(400);
+    await expectExchangeFailed(cb, 'github');
     await expectNoLeak('github profile error', s.res, cb);
   });
 
@@ -232,9 +251,8 @@ describe('planted secret never leaves (ID token signature check)', () => {
   for (const [name, opts] of failing) {
     it(`fails closed without leaking: ${name}`, async () => {
       const { s, cb, store } = await google(opts);
-      expect(cb.status).toBe(400);
+      await expectExchangeFailed(cb, 'google');
       expect(await store.findUserByIdentity('google', 'g1')).toBeUndefined();
-      expect(setCookie(cb, 'ventrical_session')).toBeUndefined();
       await expectNoLeak(name, s.res, cb);
     });
   }
