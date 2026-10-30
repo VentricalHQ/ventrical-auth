@@ -37,6 +37,3 @@ jobs:
       - run: npx semantic-release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Fallback if trusted publishing is not configured yet (first publish): a granular
-          # npm access token saved as the NPM_TOKEN repository secret. Remove once trusted publishing works.
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
