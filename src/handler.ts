@@ -1,13 +1,13 @@
 import { randomNonce, randomPKCECodeVerifier, randomState } from 'openid-client';
 import {
-  OAUTH_STATE_MAX_AGE_SEC, clearCookie, isSameOrigin, parseCookies, safeRedirect, sealOAuthState, serializeCookie,
-  type CookieOptions,
+  OAUTH_STATE_MAX_AGE_SEC, clearCookie, isSameOrigin, openOAuthState, parseCookies, safeRedirect, sameString, sealOAuthState,
+  serializeCookie, type CookieOptions,
 } from './cookies.js';
 import { hashToken } from './crypto.js';
-import { AuthHttpError } from './errors.js';
-import { PROVIDER_ORDER, createProviders, type AuthProvider } from './providers.js';
-import { SESSION_TTL_MS, makeSessions, type SessionResult } from './session.js';
-import type { AuthConfig, ProviderName } from './types.js';
+import { AuthHttpError, DuplicateIdentityError } from './errors.js';
+import { PROVIDER_ORDER, createProviders, issOf, type AuthProvider } from './providers.js';
+import { SESSION_TTL_MS, makeSessions, newSessionId, type SessionResult } from './session.js';
+import type { AuthConfig, AuthUser, ProviderName, ProviderProfile } from './types.js';
 
 export const DEFAULT_COOKIE_NAMES = { session: 'ventrical_session', oauth: 'ventrical_oauth' } as const;
 
@@ -39,6 +39,9 @@ function safeDecode(v: string): string {
     return '';
   }
 }
+
+/** Thrown inside the sign-in transaction to roll everything back and redirect to ?error=suspended. */
+class SuspendedSignal extends Error {}
 
 export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
   const clock = config.clock ?? (() => new Date());
@@ -98,6 +101,120 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
     return new Response(null, { status: 302, headers });
   }
 
+  const trimSlash = (u: string): string => u.replace(/\/+$/, '');
+  const redirectTo = (location: string, cookies: string[] = []): Response => {
+    const headers = new Headers({ location, 'cache-control': 'no-store' });
+    for (const c of cookies) headers.append('set-cookie', c);
+    return new Response(null, { status: 302, headers });
+  };
+
+  /** Never trusts the request's Host: only the configured frontendUrl and publicUrl build locations. */
+  function resolveTarget(savedRedirect: string): string {
+    const path = safeRedirect(savedRedirect);
+    const r = config.hooks?.resolveRedirect?.(path) ?? { target: 'frontend' as const, path };
+    const base = r.target === 'backend' ? config.publicUrl : config.frontendUrl;
+    return trimSlash(base) + safeRedirect(r.path);
+  }
+
+  async function callback(request: Request, url: URL, name: string): Promise<Response> {
+    const provider = lookupProvider(name);
+    const saved = openOAuthState(parseCookies(request.headers.get('cookie'))[cookieNames.oauth], config.encryptionKey);
+    const state = url.searchParams.get('state') ?? '';
+    if (!saved || saved.provider !== provider.name || !sameString(saved.state, state)) {
+      throw new AuthHttpError(400, 'invalid_state', 'Invalid or expired sign-in state');
+    }
+    const code = url.searchParams.get('code');
+    if (url.searchParams.has('error') || !code) throw new AuthHttpError(400, 'oauth_error', 'Sign-in failed');
+    let raw: ProviderProfile;
+    try {
+      raw = await provider.exchange(code, saved.codeVerifier, { state: saved.state, nonce: saved.nonce ?? '', ...issOf(url.searchParams) });
+    } catch {
+      // Provider errors can embed codes, tokens or response bodies: drop them entirely.
+      throw new AuthHttpError(400, 'oauth_error', 'Sign-in failed');
+    }
+    const profile: ProviderProfile = {
+      subject: raw.subject, emailVerified: raw.emailVerified === true,
+      ...(raw.email !== undefined ? { email: raw.email } : {}),
+      ...(raw.name !== undefined ? { name: raw.name } : {}),
+    };
+    const target = resolveTarget(saved.redirect);
+    const front = trimSlash(config.frontendUrl);
+    const signinError = (reason: string) => redirectTo(`${front}/signin?error=${encodeURIComponent(reason)}`);
+    const identity = {
+      provider: provider.name, subject: profile.subject, emailVerified: profile.emailVerified,
+      ...(profile.email !== undefined ? { email: profile.email } : {}),
+    };
+
+    // Linking needs the same session that began the flow (bound at /start) to still be current.
+    const current = await sessions.getSession(request);
+    if (current && saved.linkUserId === current.user.id) {
+      const owner = await config.store.transaction(async (tx) => {
+        const existing = await config.store.findUserByIdentity(provider.name, profile.subject, tx);
+        if (!existing) await config.store.linkIdentity(current.user.id, identity, tx);
+        return existing;
+      }).catch(async (err: unknown) => {
+        if (!(err instanceof DuplicateIdentityError)) throw err;
+        return config.store.findUserByIdentity(provider.name, profile.subject);
+      });
+      if (owner && owner.id !== current.user.id) return redirectTo(`${front}/settings?error=identity_in_use`);
+      return redirectTo(target, current.setCookie ? [current.setCookie] : []);
+    }
+
+    // Signed out, or the session changed since /start: sign in or create. Never link by email.
+    const existing = await config.store.findUserByIdentity(provider.name, profile.subject);
+    const suspendedEmail = !existing && profile.emailVerified && profile.email !== undefined ? profile.email : undefined;
+    if (suspendedEmail !== undefined && (await config.store.emailBelongsToSuspendedUser(suspendedEmail))) {
+      return signinError('suspended');
+    }
+    if (!existing && config.hooks?.canCreateAccount) {
+      const verdict = await config.hooks.canCreateAccount({ ...profile, provider: provider.name });
+      if (!verdict.allow) return signinError(verdict.reason);
+    }
+
+    const { id, idHash } = newSessionId();
+    const expiresAt = new Date(clock().getTime() + (config.sessionTtlMs ?? SESSION_TTL_MS));
+    try {
+      await config.store.transaction(async (tx) => {
+        let user: AuthUser | undefined = existing;
+        let isNew = false;
+        if (!user) {
+          // Authoritative suspended check, in the same transaction as the writes below.
+          if (suspendedEmail !== undefined && (await config.store.emailBelongsToSuspendedUser(suspendedEmail, tx))) {
+            throw new SuspendedSignal();
+          }
+          try {
+            user = await config.store.createUserWithIdentity({ ...identity, ...(profile.name !== undefined ? { name: profile.name } : {}) }, tx);
+            isNew = true;
+          } catch (err) {
+            if (!(err instanceof DuplicateIdentityError)) throw err;
+            // Lost a race to create the same identity: continue as that (returning) user. One retry only.
+            user = await config.store.findUserByIdentity(provider.name, profile.subject, tx);
+            if (!user) throw err;
+          }
+        }
+        await config.hooks?.afterSignIn?.({ user, profile, provider: provider.name, isNew, tx });
+        const ok = await config.store.createSessionUnlessSuspended(user.id, idHash, expiresAt, { provider: provider.name, subject: profile.subject }, tx);
+        if (!ok) throw new SuspendedSignal();
+      });
+    } catch (err) {
+      return signinError(err instanceof SuspendedSignal ? 'suspended' : 'sign_in_failed');
+    }
+    // Only after the transaction has committed.
+    return redirectTo(target, [sessions.sessionCookie(id)]);
+  }
+
+  async function callbackRoute(request: Request, url: URL, name: string): Promise<Response> {
+    let res: Response;
+    try {
+      res = await callback(request, url, name);
+    } catch (err) {
+      res = errorResponse(err);
+    }
+    // The state cookie is single-use: cleared on every path, errors included, so a replay fails with invalid_state.
+    res.headers.append('set-cookie', clearCookie(cookieNames.oauth, cookieOpts(0)));
+    return res;
+  }
+
   async function logout(request: Request): Promise<Response> {
     requireSameOrigin(request);
     const id = parseCookies(request.headers.get('cookie'))[cookieNames.session];
@@ -127,6 +244,8 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
       if (method === 'POST' && path === '/auth/logout-everywhere') return await logoutEverywhere(request);
       const m = method === 'GET' ? /^\/auth\/([^/]+)\/start$/.exec(path) : null;
       if (m) return await start(request, url, safeDecode(m[1]!));
+      const cb = method === 'GET' ? /^\/auth\/([^/]+)\/callback$/.exec(path) : null;
+      if (cb) return await callbackRoute(request, url, safeDecode(cb[1]!));
       return undefined;
     } catch (err) {
       return errorResponse(err);
