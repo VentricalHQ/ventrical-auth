@@ -243,9 +243,9 @@ export function storeContract(name: string, make: () => Promise<StoreHarness>): 
 
     it('verifiedEmail uses the identity the session was created with, not another linked identity', async () => {
       const { store } = await fresh();
+      await store.createUserWithIdentity({ provider: 'google', subject: 'g2', email: 'other@example.test', emailVerified: true });
       const u = await store.createUserWithIdentity({ ...IDENT, email: 'g@example.test', emailVerified: false });
       await store.linkIdentity(u.id, { provider: 'github', subject: 'h2', email: 'h@example.test', emailVerified: true });
-      await store.createUserWithIdentity({ provider: 'google', subject: 'g2', email: 'other@example.test', emailVerified: true });
       await session(store, u.id, 'h1', future());
       expect((await store.getSessionWithExpiry('h1', new Date()))?.verifiedEmail ?? null).toBeNull();
       await store.transaction((tx) => store.createSessionUnlessSuspended(u.id, 'h2', future(), { provider: 'github', subject: 'h2' }, tx));
