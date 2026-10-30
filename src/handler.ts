@@ -103,7 +103,14 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
 
   const trimSlash = (u: string): string => u.replace(/\/+$/, '');
   const redirectTo = (location: string, cookies: string[] = []): Response => {
-    const headers = new Headers({ location, 'cache-control': 'no-store' });
+    // new URL percent-encodes non-ASCII paths; a Location must never throw (this runs after the commit).
+    let href: string;
+    try {
+      href = new URL(location).href;
+    } catch {
+      href = `${trimSlash(config.frontendUrl)}/`;
+    }
+    const headers = new Headers({ location: href, 'cache-control': 'no-store' });
     for (const c of cookies) headers.append('set-cookie', c);
     return new Response(null, { status: 302, headers });
   };
@@ -148,20 +155,23 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
     // Linking needs the same session that began the flow (bound at /start) to still be current.
     const current = await sessions.getSession(request);
     if (current && saved.linkUserId === current.user.id) {
+      let linkDuplicate = false;
       const owner = await config.store.transaction(async (tx) => {
         const existing = await config.store.findUserByIdentity(provider.name, profile.subject, tx);
         if (!existing) await config.store.linkIdentity(current.user.id, identity, tx);
         return existing;
       }).catch(async (err: unknown) => {
         if (!(err instanceof DuplicateIdentityError)) throw err;
+        linkDuplicate = true; // the transaction was abandoned; look again outside it
         return config.store.findUserByIdentity(provider.name, profile.subject);
       });
       if (owner && owner.id !== current.user.id) return redirectTo(`${front}/settings?error=identity_in_use`);
+      if (linkDuplicate && !owner) return redirectTo(`${front}/settings?error=link_failed`);
       return redirectTo(target, current.setCookie ? [current.setCookie] : []);
     }
 
     // Signed out, or the session changed since /start: sign in or create. Never link by email.
-    const existing = await config.store.findUserByIdentity(provider.name, profile.subject);
+    let existing = await config.store.findUserByIdentity(provider.name, profile.subject);
     const suspendedEmail = !existing && profile.emailVerified && profile.email !== undefined ? profile.email : undefined;
     if (suspendedEmail !== undefined && (await config.store.emailBelongsToSuspendedUser(suspendedEmail))) {
       return signinError('suspended');
@@ -173,29 +183,33 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
 
     const { id, idHash } = newSessionId();
     const expiresAt = new Date(clock().getTime() + (config.sessionTtlMs ?? SESSION_TTL_MS));
-    try {
-      await config.store.transaction(async (tx) => {
-        let user: AuthUser | undefined = existing;
-        let isNew = false;
-        if (!user) {
-          // Authoritative suspended check, in the same transaction as the writes below.
-          if (suspendedEmail !== undefined && (await config.store.emailBelongsToSuspendedUser(suspendedEmail, tx))) {
-            throw new SuspendedSignal();
-          }
-          try {
-            user = await config.store.createUserWithIdentity({ ...identity, ...(profile.name !== undefined ? { name: profile.name } : {}) }, tx);
-            isNew = true;
-          } catch (err) {
-            if (!(err instanceof DuplicateIdentityError)) throw err;
-            // Lost a race to create the same identity: continue as that (returning) user. One retry only.
-            user = await config.store.findUserByIdentity(provider.name, profile.subject, tx);
-            if (!user) throw err;
-          }
+    const attempt = (found: AuthUser | undefined) => config.store.transaction(async (tx) => {
+      let user: AuthUser | undefined = found;
+      let isNew = false;
+      if (!user) {
+        // Authoritative suspended check, in the same transaction as the writes below.
+        if (suspendedEmail !== undefined && (await config.store.emailBelongsToSuspendedUser(suspendedEmail, tx))) {
+          throw new SuspendedSignal();
         }
-        await config.hooks?.afterSignIn?.({ user, profile, provider: provider.name, isNew, tx });
-        const ok = await config.store.createSessionUnlessSuspended(user.id, idHash, expiresAt, { provider: provider.name, subject: profile.subject }, tx);
-        if (!ok) throw new SuspendedSignal();
-      });
+        user = await config.store.createUserWithIdentity({ ...identity, ...(profile.name !== undefined ? { name: profile.name } : {}) }, tx);
+        isNew = true;
+      }
+      // Also runs for a returning user who is suspended: createSessionUnlessSuspended then refuses and its tx writes roll back.
+      await config.hooks?.afterSignIn?.({ user, profile, provider: provider.name, isNew, tx });
+      const ok = await config.store.createSessionUnlessSuspended(user.id, idHash, expiresAt, { provider: provider.name, subject: profile.subject }, tx);
+      if (!ok) throw new SuspendedSignal();
+    });
+    try {
+      try {
+        await attempt(existing);
+      } catch (err) {
+        if (!(err instanceof DuplicateIdentityError)) throw err;
+        // Lost a race to create the same identity. The transaction was abandoned: re-run it once as a whole,
+        // now finding that identity and continuing as a returning user. A second failure is sign_in_failed.
+        existing = await config.store.findUserByIdentity(provider.name, profile.subject);
+        if (!existing) throw err;
+        await attempt(existing);
+      }
     } catch (err) {
       return signinError(err instanceof SuspendedSignal ? 'suspended' : 'sign_in_failed');
     }

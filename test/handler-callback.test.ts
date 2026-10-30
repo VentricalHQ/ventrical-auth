@@ -37,7 +37,7 @@ async function flow(auth: Auth, provider: string, o: { session?: string; startSe
   const oauthCookie = `ventrical_oauth=${encodeURIComponent(setCookie(start, 'ventrical_oauth')!.value)}`;
   const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
   const cookie = [oauthCookie, o.session].filter(Boolean).join('; ');
-  const path = `/auth/${provider}/callback?${o.query ?? `code=fake-code&state=${encodeURIComponent(state)}`}`;
+  const path = `/auth/${provider}/callback?${(o.query ?? 'code=fake-code&state={state}').replace('{state}', encodeURIComponent(state))}`;
   const res = (await auth.handle(req('GET', path, { cookie })))!;
   return { res, cookie, oauthCookie, state, path };
 }
@@ -160,6 +160,64 @@ describe('GET /auth/:provider/callback', () => {
     expect(await store.findUserByIdentity('github', 'h1')).toBeDefined();
   });
 
+  it('the in-transaction suspended-email check catches a suspension after the pre-check', async () => {
+    const { auth, store } = setup({ google: prof('g1', { email: 'o@example.test' }), github: prof('h1', { email: 'o@example.test' }) }, {
+      hooks: {
+        // Runs after the pre-check and before the transaction.
+        canCreateAccount: async () => {
+          const owner = await store.findUserByIdentity('google', 'g1');
+          if (owner) store.suspend(owner.id);
+          return { allow: true };
+        },
+      },
+    });
+    await flow(auth, 'google'); // creates the owner (hook finds no owner yet)
+    const before = count(store);
+    const { res } = await flow(auth, 'github');
+    expect(loc(res)).toBe(`${FRONT}/signin?error=suspended`);
+    expect(sessionCookieOf(res)).toBeUndefined();
+    expect(await store.findUserByIdentity('github', 'h1')).toBeUndefined();
+    expect(count(store)).toBe(before);
+  });
+
+  it('a non-ASCII redirect signs in with a percent-encoded Location', async () => {
+    const { auth, store } = setup({ google: prof('g1') });
+    const { res } = await flow(auth, 'google', { redirect: '/日本?q=é' });
+    expect(res.status).toBe(302);
+    expect(loc(res)).toBe(`${FRONT}/%E6%97%A5%E6%9C%AC?q=%C3%A9`);
+    expect(sessionCookieOf(res)).toBeDefined();
+    expect(await store.findUserByIdentity('google', 'g1')).toBeDefined();
+  });
+
+  it('a non-ASCII redirect on link ends with a percent-encoded Location', async () => {
+    const { auth, store } = setup({ google: prof('g1'), github: prof('h1') });
+    const sess = `ventrical_session=${sessionCookieOf((await flow(auth, 'google')).res)!.value}`;
+    const { res } = await flow(auth, 'github', { session: sess, redirect: '/日本' });
+    expect(res.status).toBe(302);
+    expect(loc(res)).toBe(`${FRONT}/%E6%97%A5%E6%9C%AC`);
+    const a = (await store.findUserByIdentity('google', 'g1'))!;
+    expect((await store.findUserByIdentity('github', 'h1'))!.id).toBe(a.id);
+  });
+
+  it('a hook path that is not a valid URL never makes the response throw', async () => {
+    const { auth } = setup({ google: prof('g1') }, { hooks: { resolveRedirect: () => ({ target: 'frontend', path: '/\u0000\ud800x' }) } });
+    const { res } = await flow(auth, 'google');
+    expect(res.status).toBe(302);
+    expect(sessionCookieOf(res)).toBeDefined();
+    expect(loc(res)!.startsWith(`${FRONT}/`)).toBe(true);
+  });
+
+  it('a duplicate on link with no owner found redirects link_failed', async () => {
+    const store = createMemoryStore();
+    const dup = Object.assign(Object.create(store) as typeof store, {
+      linkIdentity: async () => { throw new DuplicateIdentityError(); },
+    });
+    const { auth } = setup({ google: prof('g1'), github: prof('h1') }, { store: dup });
+    const sess = `ventrical_session=${sessionCookieOf((await flow(auth, 'google')).res)!.value}`;
+    const { res } = await flow(auth, 'github', { session: sess });
+    expect(loc(res)).toBe(`${FRONT}/settings?error=link_failed`);
+  });
+
   it('suspension between lookup and session insert leaves no session', async () => {
     const store = createMemoryStore();
     const racing = Object.assign(Object.create(store) as typeof store, {
@@ -178,10 +236,10 @@ describe('GET /auth/:provider/callback', () => {
   it('canCreateAccount deny redirects with the reason and creates nothing', async () => {
     const seen: unknown[] = [];
     const { auth, store } = setup({ google: prof('g1') }, {
-      hooks: { canCreateAccount: async (p) => { seen.push(p); return { allow: false, reason: 'invite only & more' }; } },
+      hooks: { canCreateAccount: async (p) => { seen.push(p); return { allow: false, reason: 'a&b#c%0d%0a' }; } },
     });
     const { res } = await flow(auth, 'google');
-    expect(loc(res)).toBe(`${FRONT}/signin?error=${encodeURIComponent('invite only & more')}`);
+    expect(loc(res)).toBe(`${FRONT}/signin?error=${encodeURIComponent('a&b#c%0d%0a')}`);
     expect(sessionCookieOf(res)).toBeUndefined();
     expect(await store.findUserByIdentity('google', 'g1')).toBeUndefined();
     expect(count(store)).toBe(0);
@@ -266,7 +324,7 @@ describe('GET /auth/:provider/callback', () => {
     const cleared = setCookie(first.res, 'ventrical_oauth')!;
     expect(cleared.value).toBe('');
     expect(cleared.attrs['max-age']).toBe('0');
-    // The browser honoured Max-Age=0, so a replay carries no cookie; and even a stale copy of the old one must not sign in twice.
+    // Proves: the state cookie is cleared with Max-Age=0, and a callback arriving without it fails with invalid_state.
     const noCookie = (await auth.handle(req('GET', first.path)))!;
     expect(noCookie.status).toBe(400);
     expect((await noCookie.json() as any).error.code).toBe('invalid_state');
@@ -277,6 +335,20 @@ describe('GET /auth/:provider/callback', () => {
     expect(count(store)).toBe(before);
   });
 
+  it('a tampered state cookie gives invalid_state', async () => {
+    const { auth, store } = setup({ google: prof('g1') });
+    const start = (await auth.handle(req('GET', '/auth/google/start')))!;
+    const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
+    const v = setCookie(start, 'ventrical_oauth')!.value;
+    const flipped = v.slice(0, -2) + (v.endsWith('A') ? 'B' : 'A') + v.slice(-1);
+    for (const bad of [flipped, 'garbage', v.slice(0, 10)]) {
+      const res = (await auth.handle(req('GET', `/auth/google/callback?code=c&state=${state}`, { cookie: `ventrical_oauth=${encodeURIComponent(bad)}` })))!;
+      expect(res.status).toBe(400);
+      expect((await res.json() as any).error.code).toBe('invalid_state');
+    }
+    expect(count(store)).toBe(0);
+  });
+
   it('the state cookie is cleared on every response path', async () => {
     const { auth } = setup({ google: prof('g1') });
     const bad = (await auth.handle(req('GET', '/auth/google/callback?code=c&state=nope')))!;
@@ -284,9 +356,14 @@ describe('GET /auth/:provider/callback', () => {
     const unknown = (await auth.handle(req('GET', '/auth/nope/callback?code=c&state=nope')))!;
     expect(unknown.status).toBe(404);
     expect(setCookie(unknown, 'ventrical_oauth')!.attrs['max-age']).toBe('0');
-    const denied = await flow(auth, 'google', { query: 'error=access_denied&error_description=leak' });
+    const denied = await flow(auth, 'google', { query: 'error=access_denied&error_description=leak&state={state}' });
     expect(denied.res.status).toBe(400);
+    expect((await denied.res.json() as any).error.code).toBe('oauth_error');
     expect(setCookie(denied.res, 'ventrical_oauth')!.attrs['max-age']).toBe('0');
+    const noCode = await flow(auth, 'google', { query: 'state={state}' });
+    expect(noCode.res.status).toBe(400);
+    expect((await noCode.res.json() as any).error.code).toBe('oauth_error');
+    expect(setCookie(noCode.res, 'ventrical_oauth')!.attrs['max-age']).toBe('0');
     const failed = setup({ google: new Error('x') });
     const f = await flow(failed.auth, 'google');
     expect(setCookie(f.res, 'ventrical_oauth')!.attrs['max-age']).toBe('0');
@@ -299,8 +376,6 @@ describe('GET /auth/:provider/callback', () => {
     const { auth } = setup({ google: prof('g1'), github: prof('h1') });
     const wrong = await flow(auth, 'google', { query: 'code=c&state=wrong' });
     expect((await wrong.res.json() as any).error.code).toBe('invalid_state');
-    const noCode = await flow(auth, 'google', { query: `state=${(await flow(auth, 'google', { query: 'x=1' })).state}` });
-    expect(noCode.res.status).toBe(400);
     // Cookie from a google /start used on the github callback.
     const g = await flow(auth, 'google', { query: 'x=1' });
     const cross = (await auth.handle(req('GET', `/auth/github/callback?code=c&state=${g.state}`, { cookie: g.oauthCookie })))!;

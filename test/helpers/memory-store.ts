@@ -19,9 +19,29 @@ export function createMemoryStore(): MemoryStore {
   let sessions = new Map<string, StoredSession>();
   let seq = 0;
   let txSeq = 0;
+  // Transactions run one at a time (like row-level conflicts would force), so a rollback snapshot never erases a concurrent commit.
+  let queue: Promise<unknown> = Promise.resolve();
 
   const publicUser = (u: StoredUser): AuthUser => ({ id: u.id, email: u.email, name: u.name });
   const isSuspended = (userId: string) => users.get(userId)?.suspended === true;
+
+  async function runTx<T>(fn: (tx: MemoryTx) => Promise<T>): Promise<T> {
+    const snap = {
+      users: new Map([...users].map(([k, u]) => [k, { ...u }] as const)),
+      identities: identities.map((i) => ({ ...i })),
+      sessions: new Map([...sessions].map(([k, s]) => [k, { ...s, identity: { ...s.identity } }] as const)),
+      seq,
+    };
+    try {
+      return await fn({ id: ++txSeq });
+    } catch (err) {
+      users = snap.users;
+      identities = snap.identities;
+      sessions = snap.sessions;
+      seq = snap.seq;
+      throw err;
+    }
+  }
 
   const store: MemoryStore = {
     get sessions() { return sessions; },
@@ -29,22 +49,10 @@ export function createMemoryStore(): MemoryStore {
       const u = users.get(userId);
       if (u) u.suspended = true;
     },
-    async transaction(fn) {
-      const snap = {
-        users: new Map([...users].map(([k, u]) => [k, { ...u }] as const)),
-        identities: identities.map((i) => ({ ...i })),
-        sessions: new Map([...sessions].map(([k, s]) => [k, { ...s, identity: { ...s.identity } }] as const)),
-        seq,
-      };
-      try {
-        return await fn({ id: ++txSeq });
-      } catch (err) {
-        users = snap.users;
-        identities = snap.identities;
-        sessions = snap.sessions;
-        seq = snap.seq;
-        throw err;
-      }
+    transaction(fn) {
+      const run = queue.then(() => runTx(fn), () => runTx(fn));
+      queue = run.catch(() => undefined);
+      return run;
     },
     async findUserByIdentity(provider, subject) {
       const i = identities.find((x) => x.provider === provider && x.subject === subject);

@@ -25,9 +25,16 @@ export interface NewIdentity {
 export interface AuthStore<Tx = unknown> {
   transaction<T>(fn: (tx: Tx) => Promise<T>): Promise<T>;
   findUserByIdentity(provider: ProviderName, subject: string, tx?: Tx): Promise<AuthUser | undefined>;
+  /**
+   * Must throw DuplicateIdentityError when (provider, subject) already exists. The handler then abandons the
+   * transaction (it rolls back entirely) and re-runs it once, so no savepoint is needed.
+   */
   createUserWithIdentity(p: NewIdentity & { name?: string }, tx?: Tx): Promise<AuthUser>;
   linkIdentity(userId: string, identity: NewIdentity, tx?: Tx): Promise<void>;
-  /** Verified identity emails only, case-insensitive. */
+  /**
+   * Verified identity emails only, case-insensitive. When given a tx it must hold FOR SHARE (or an equivalent lock)
+   * on the matching user rows, so a suspension cannot slip in before the transaction commits.
+   */
   emailBelongsToSuspendedUser(email: string, tx?: Tx): Promise<boolean>;
   /** Holds the user row FOR SHARE; returns false when the user is suspended. */
   createSessionUnlessSuspended(
