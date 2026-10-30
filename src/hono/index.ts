@@ -2,10 +2,10 @@
 import type { MiddlewareHandler } from 'hono';
 import type { Auth } from '../index.js';
 import { AuthHttpError } from '../errors.js';
-import type { AuthUser } from '../types.js';
+import type { SessionUser } from '../session.js';
 
 /** Context variables set by `requireSession`: `c.get('user')`. */
-export type AuthVariables = { user: AuthUser };
+export type AuthVariables = { user: SessionUser };
 
 function toRequest(raw: Request, publicUrl: string): Request | undefined {
   let source: URL;

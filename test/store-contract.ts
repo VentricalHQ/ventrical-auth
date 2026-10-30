@@ -222,6 +222,53 @@ export function storeContract(name: string, make: () => Promise<StoreHarness>): 
       expect(await store.emailBelongsToSuspendedUser('old@example.test')).toBe(false);
     });
 
+    it('getSessionWithExpiry.verifiedEmail is null for an unverified identity email and the email when verified', async () => {
+      const { store } = await fresh();
+      const a = await store.createUserWithIdentity({ ...IDENT, email: 'a@example.test', emailVerified: false });
+      await session(store, a.id, 'ha', future());
+      const unverified = await store.getSessionWithExpiry('ha', new Date());
+      expect(unverified?.user.email).toBe('a@example.test');
+      expect(unverified?.verifiedEmail ?? null).toBeNull();
+      const b = await store.createUserWithIdentity({ provider: 'github', subject: 'h2', email: 'b@example.test', emailVerified: true });
+      await store.transaction((tx) => store.createSessionUnlessSuspended(b.id, 'hb', future(), { provider: 'github', subject: 'h2' }, tx));
+      expect((await store.getSessionWithExpiry('hb', new Date()))?.verifiedEmail).toBe('b@example.test');
+    });
+
+    it('verifiedEmail is null for a verified identity with no stored email', async () => {
+      const { store } = await fresh();
+      const u = await store.createUserWithIdentity({ ...IDENT, emailVerified: true });
+      await session(store, u.id, 'h1', future());
+      expect((await store.getSessionWithExpiry('h1', new Date()))?.verifiedEmail ?? null).toBeNull();
+    });
+
+    it('verifiedEmail uses the identity the session was created with, not another linked identity', async () => {
+      const { store } = await fresh();
+      const u = await store.createUserWithIdentity({ ...IDENT, email: 'g@example.test', emailVerified: false });
+      await store.linkIdentity(u.id, { provider: 'github', subject: 'h2', email: 'h@example.test', emailVerified: true });
+      await store.createUserWithIdentity({ provider: 'google', subject: 'g2', email: 'other@example.test', emailVerified: true });
+      await session(store, u.id, 'h1', future());
+      expect((await store.getSessionWithExpiry('h1', new Date()))?.verifiedEmail ?? null).toBeNull();
+      await store.transaction((tx) => store.createSessionUnlessSuspended(u.id, 'h2', future(), { provider: 'github', subject: 'h2' }, tx));
+      expect((await store.getSessionWithExpiry('h2', new Date()))?.verifiedEmail).toBe('h@example.test');
+    });
+
+    it('verifiedEmail follows updateIdentity (new email, unverified, cleared)', async () => {
+      const { store } = await fresh();
+      if (!store.updateIdentity) throw new Error('updateIdentity missing');
+      const u = await store.createUserWithIdentity({ ...IDENT, email: 'old@example.test', emailVerified: true });
+      await session(store, u.id, 'h1', future());
+      const ve = async () => (await store.getSessionWithExpiry('h1', new Date()))?.verifiedEmail ?? null;
+      expect(await ve()).toBe('old@example.test');
+      await store.updateIdentity('google', 'g1', { email: 'new@example.test', emailVerified: true });
+      expect(await ve()).toBe('new@example.test');
+      await store.updateIdentity('google', 'g1', { emailVerified: false });
+      expect(await ve()).toBeNull();
+      await store.updateIdentity('google', 'g1', { emailVerified: true });
+      expect(await ve()).toBe('new@example.test');
+      await store.updateIdentity('google', 'g1', { email: null, emailVerified: true });
+      expect(await ve()).toBeNull();
+    });
+
     it('updateIdentity is a no-op for an unknown identity', async () => {
       const { store } = await fresh();
       if (!store.updateIdentity) throw new Error('updateIdentity missing');

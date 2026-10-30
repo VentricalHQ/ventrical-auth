@@ -62,7 +62,20 @@ export interface AuthStore<Tx = unknown> {
   getSessionWithExpiry(
     idHash: string,
     now: Date,
-  ): Promise<{ user: AuthUser; expiresAt: Date; identity?: { provider: string; subject: string } } | undefined>;
+  ): Promise<
+    | {
+        user: AuthUser;
+        expiresAt: Date;
+        identity?: { provider: string; subject: string };
+        /**
+         * The stored email of the identity the session was created with, when that identity is verified; null when the
+         * session has no identity, the identity is unverified, or it has no email. Optional so existing custom stores
+         * keep compiling: an omitted value is treated as null.
+         */
+        verifiedEmail?: string | null;
+      }
+    | undefined
+  >;
   touchSession(idHash: string, expiresAt: Date): Promise<void>;
   deleteSession(idHash: string): Promise<void>;
   deleteSessionsForUser(userId: string, tx?: Tx): Promise<number>;

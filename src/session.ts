@@ -3,13 +3,19 @@ import { hashToken, randomToken } from './crypto.js';
 import { AuthHttpError, SUSPENDED_MESSAGE } from './errors.js';
 import type { AuthStore, AuthUser } from './types.js';
 
+/**
+ * The session user. `email` is provider data that may be unverified: never use it for authorization, ownership or
+ * matching. Only `verifiedEmail` (null unless the signing-in identity's email is verified) may be.
+ */
+export type SessionUser = AuthUser & { verifiedEmail: string | null };
+
 /** Default session life: 30 days. */
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 /** A session with less than 29 days left is refreshed on use. */
 export const REFRESH_BELOW_MS = 29 * 24 * 60 * 60 * 1000;
 
 export interface SessionResult {
-  user: AuthUser;
+  user: SessionUser;
   id: string;
   /** Present when the session was refreshed; the caller must send it as Set-Cookie. */
   setCookie?: string;
@@ -54,7 +60,7 @@ export function makeSessions(cfg: SessionsConfig) {
     const idHash = hashToken(id);
     const found = await cfg.store.getSessionWithExpiry(idHash, now);
     if (!found) return undefined;
-    const result: SessionResult = { user: found.user, id };
+    const result: SessionResult = { user: { ...found.user, verifiedEmail: found.verifiedEmail ?? null }, id };
     if (found.expiresAt.getTime() - now.getTime() < REFRESH_BELOW_MS) {
       await cfg.store.touchSession(idHash, new Date(now.getTime() + cfg.sessionTtlMs));
       result.setCookie = sessionCookie(id);

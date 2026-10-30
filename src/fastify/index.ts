@@ -2,11 +2,11 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest, preHandlerAsyncHookHandler } from 'fastify';
 import type { Auth } from '../index.js';
 import { AuthHttpError } from '../errors.js';
-import type { AuthUser } from '../types.js';
+import type { SessionUser } from '../session.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
-    user?: AuthUser;
+    user?: SessionUser;
   }
 }
 

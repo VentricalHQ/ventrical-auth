@@ -2,12 +2,11 @@
 import type { NextFunction, Request as ExpressRequest, RequestHandler, Response as ExpressResponse } from 'express';
 import type { Auth } from '../index.js';
 import { AuthHttpError } from '../errors.js';
-import type { SessionResult } from '../session.js';
-import type { AuthUser } from '../types.js';
+import type { SessionResult, SessionUser } from '../session.js';
 
 declare module 'express-serve-static-core' {
   interface Request {
-    user?: AuthUser;
+    user?: SessionUser;
   }
 }
 

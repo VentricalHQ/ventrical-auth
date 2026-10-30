@@ -107,7 +107,9 @@ Routes served by `handle` (and so by `authRouter`):
 `createAuth` returns `{ publicUrl, handle, getSession, requireSession }`:
 
 - `handle(request: Request): Promise<Response | undefined>` serves the auth routes. It returns `undefined` for any path it does not own, **and also for the wrong method on an owned path** (for example `POST /auth/providers`), so the host application decides what a 404 or 405 looks like.
-- `getSession(request)` returns `{ user, id, setCookie? }` or `undefined`. When `setCookie` is present the session was refreshed and the caller must send it as `Set-Cookie`.
+- `getSession(request)` returns `{ user, id, setCookie? }` (`user` is the `AuthUser` plus `verifiedEmail`) or `undefined`. When `setCookie` is present the session was refreshed and the caller must send it as `Set-Cookie`.
+**Warning: `user.email` is unverified provider data.** It is the first email the provider returned and it may not be verified. **Never use `user.email` for authorization, ownership, account matching or any security decision.** Only `user.verifiedEmail` may be used for that. `verifiedEmail` is `string | null`: the stored email of the identity this session signed in with, when that identity's email is verified, otherwise `null` (including a session with no identity). It follows later identity updates, so it can turn `null` if the provider stops vouching for the address. The same `user` shape (`id`, `email`, `name`, `verifiedEmail`) is what `req.user`, `request.user`, `c.get('user')` and the Next helpers expose. A custom store supplies it as the optional `verifiedEmail` on `getSessionWithExpiry`; when omitted it reads as `null`.
+
 - `requireSession(request)` is like `getSession` but throws `AuthHttpError` (`401 unauthenticated`, or `403 account_suspended` when the cookie belongs to a currently suspended user).
 
 The core never touches Express's `req` or `res`. Cookies are read from the `Cookie` header and written as `Set-Cookie` headers on the `Response`; redirects are `Response` objects with a `Location` header.
@@ -238,7 +240,7 @@ Each app implements `AuthStore<Tx>` over its own database (or uses the Postgres 
 | `linkIdentity(userId, identity, tx?)` | Adds an identity to a user; also throws `DuplicateIdentityError` on a duplicate. |
 | `emailBelongsToSuspendedUser(email, tx?)` | Verified identity emails only, case-insensitive. **With a `tx` it must hold `FOR SHARE` (or an equivalent lock) on the matching user rows**, so a suspension cannot commit between the check and the end of the transaction. |
 | `createSessionUnlessSuspended(userId, idHash, expiresAt, identity, tx)` | Holds the user row `FOR SHARE`; inserts the session and returns `true`, or returns `false` when the user is suspended. |
-| `getSessionWithExpiry(idHash, now)` | The session's user and expiry, excluding suspended users. |
+| `getSessionWithExpiry(idHash, now)` | The session's user and expiry, excluding suspended users. Also `verifiedEmail`: the email of the identity the session was created with when that identity is verified, else `null`. |
 | `touchSession(idHash, expiresAt)`, `deleteSession(idHash)`, `deleteSessionsForUser(userId, tx?)` | As named; `deleteSessionsForUser` returns the number deleted. |
 | `purgeExpiredSessions(now)` | **Required.** Deletes every session with `expires_at <= now` and returns how many were removed. Custom `AuthStore` implementers must add it. |
 | `updateIdentity?(provider, subject, update, tx?)` | Optional. Updates the stored `email` and `emailVerified` of an existing identity (`email` undefined leaves it unchanged, null clears it; a no-op when the identity does not exist). The handler calls it inside the sign-in transaction on a returning sign-in, so the stored identity email stays current. Without it the stored email is not refreshed. |

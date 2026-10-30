@@ -42,6 +42,25 @@ describe('sessions', () => {
     expect(r?.id).toBe(s.id);
   });
 
+  it('exposes verifiedEmail on the session user, separate from the possibly unverified user.email', async () => {
+    const s = await setup();
+    const r = await s.sessions.getSession(s.req(`sid=${s.id}`));
+    expect(r?.user.verifiedEmail).toBe('a@example.test');
+    await s.store.updateIdentity!('github', 's1', { email: 'b@example.test', emailVerified: false });
+    const r2 = await s.sessions.getSession(s.req(`sid=${s.id}`));
+    expect(r2?.user.verifiedEmail).toBeNull();
+    expect(r2?.user.email).toBe('a@example.test');
+    expect(r2?.user).toHaveProperty('verifiedEmail', null);
+  });
+
+  it('verifiedEmail is null when a custom store does not return it', async () => {
+    const s = await setup();
+    const inner = s.store;
+    const legacy = { ...inner, getSessionWithExpiry: async (h: string, n: Date) => { const { verifiedEmail: _v, ...rest } = (await inner.getSessionWithExpiry(h, n))!; return rest; } };
+    const sessions = makeSessions({ store: legacy, cookieNames: { session: 'sid', oauth: 'oauth' }, publicUrl: 'https://auth.example.test', sessionTtlMs: TTL, clock: () => t0 });
+    expect((await sessions.getSession(s.req(`sid=${s.id}`)))?.user.verifiedEmail).toBeNull();
+  });
+
   it('does not refresh a fresh session', async () => {
     const s = await setup();
     s.setNow(new Date(t0.getTime() + 0.5 * DAY));

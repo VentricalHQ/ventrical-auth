@@ -81,19 +81,19 @@ describe('express adapter', () => {
   it('requireSession sets req.user and returns 401 JSON without a cookie', async () => {
     const { auth, store } = setup();
     const base = await listen((app, a) => {
-      app.get('/me', requireSession(a), (req, res) => { res.json({ id: req.user!.id }); });
+      app.get('/me', requireSession(a), (req, res) => { res.json({ id: req.user!.id, verifiedEmail: req.user!.verifiedEmail }); });
     }, auth);
 
     const anon = await get(`${base}/me`);
     expect(anon.status).toBe(401);
     expect((await anon.json() as any).error.code).toBe('unauthenticated');
 
-    const user = await store.createUserWithIdentity({ provider: 'google', subject: 'g9', emailVerified: true });
+    const user = await store.createUserWithIdentity({ provider: 'google', subject: 'g9', email: 'nine@example.test', emailVerified: true });
     const sid = newSessionId();
     await store.transaction((tx) => store.createSessionUnlessSuspended(user.id, sid.idHash, new Date(Date.now() + 864e5), { provider: 'google', subject: 'g9' }, tx));
     const ok = await get(`${base}/me`, { cookie: `__Host-ventrical_session=${sid.id}` });
     expect(ok.status).toBe(200);
-    expect(await ok.json()).toEqual({ id: user.id });
+    expect(await ok.json()).toEqual({ id: user.id, verifiedEmail: 'nine@example.test' });
   });
 
   it('multiple Set-Cookie headers all reach the client', async () => {

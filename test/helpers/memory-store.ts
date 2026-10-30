@@ -93,7 +93,9 @@ export function createMemoryStore(): MemoryStore {
       if (!s || s.expiresAt.getTime() <= now.getTime()) return undefined;
       const u = users.get(s.userId);
       if (!u || u.suspended) return undefined;
-      return { user: publicUser(u), expiresAt: s.expiresAt, identity: s.identity };
+      const i = identities.find((x) => x.provider === s.identity.provider && x.subject === s.identity.subject);
+      const verifiedEmail = i && i.emailVerified && i.email ? i.email : null;
+      return { user: publicUser(u), expiresAt: s.expiresAt, identity: s.identity, verifiedEmail };
     },
     async touchSession(idHash, expiresAt) {
       const s = sessions.get(idHash);

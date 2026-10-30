@@ -125,8 +125,10 @@ export function pgAuthStore(pool: pg.Pool): AuthStore<pg.PoolClient> {
 
     async getSessionWithExpiry(idHash, now) {
       const r = await pool.query(
-        `select u.id, u.email, u.name, s.expires_at, s.identity_provider, s.identity_subject
+        `select u.id, u.email, u.name, s.expires_at, s.identity_provider, s.identity_subject,
+                case when i.email_verified then i.email end as verified_email
          from sessions s join users u on u.id = s.user_id
+         left join identities i on i.provider = s.identity_provider and i.subject = s.identity_subject
          where s.id_hash = $1 and s.expires_at > $2 and u.suspended_at is null`,
         [idHash, now],
       );
@@ -135,7 +137,12 @@ export function pgAuthStore(pool: pg.Pool): AuthStore<pg.PoolClient> {
       const identity = row.identity_provider && row.identity_subject
         ? { provider: row.identity_provider as string, subject: row.identity_subject as string }
         : undefined;
-      return { user: toUser(row), expiresAt: row.expires_at as Date, ...(identity ? { identity } : {}) };
+      return {
+        user: toUser(row),
+        expiresAt: row.expires_at as Date,
+        ...(identity ? { identity } : {}),
+        verifiedEmail: (row.verified_email as string | null) ?? null,
+      };
     },
 
     async touchSession(idHash, expiresAt) {

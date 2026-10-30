@@ -51,6 +51,7 @@ function validateConfig(config: AuthConfig<any>): void {
 }
 
 export type { Auth } from './handler.js';
+export type { SessionResult, SessionUser } from './session.js';
 
 /** Validates config and returns the framework-neutral core: `handle`, `getSession`, `requireSession`. */
 export function createAuth<Tx = unknown>(config: AuthConfig<Tx>): Auth {
