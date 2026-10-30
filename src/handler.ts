@@ -207,24 +207,34 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
     const current = await sessions.getSession(request);
     if (current && saved.linkUserId === current.user.id) {
       ctx.stage = 'link';
+      const linkError = async (reason: string) => {
+        await report(ctx.stage, reason, provider.name);
+        return redirectTo(`${front}/settings?error=${reason}`);
+      };
       let linkDuplicate = false;
+      let linkSuspended = false;
       const owner = await config.store.transaction(async (tx) => {
         const existing = await config.store.findUserByIdentity(provider.name, profile.subject, tx);
-        if (!existing) await config.store.linkIdentity(current.user.id, identity, tx);
+        if (!existing) {
+          // A verified email that belongs to a suspended user cannot be attached to another account (authoritative, locked).
+          if (profile.emailVerified && profile.email !== undefined && (await config.store.emailBelongsToSuspendedUser(profile.email, tx))) {
+            throw new SuspendedSignal();
+          }
+          await config.store.linkIdentity(current.user.id, identity, tx);
+        }
         return existing;
       }).catch(async (err: unknown) => {
+        if (err instanceof SuspendedSignal) { linkSuspended = true; return undefined; }
         if (!(err instanceof DuplicateIdentityError)) throw err;
         linkDuplicate = true; // the transaction was abandoned; look again outside it
         return config.store.findUserByIdentity(provider.name, profile.subject);
       });
+      if (linkSuspended) return await linkError('suspended');
       if (owner && owner.id !== current.user.id) {
         await report(ctx.stage, 'identity_in_use', provider.name);
         return redirectTo(`${front}/settings?error=identity_in_use`);
       }
-      if (linkDuplicate && !owner) {
-        await report(ctx.stage, 'link_failed', provider.name);
-        return redirectTo(`${front}/settings?error=link_failed`);
-      }
+      if (linkDuplicate && !owner) return await linkError('link_failed');
       return redirectTo(target, current.setCookie ? [current.setCookie] : []);
     }
 
@@ -246,6 +256,12 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
       let isNew = false;
       if (found && user && config.store.updateIdentity && profile.email !== undefined && found.identity
         && (found.identity.email !== profile.email || found.identity.emailVerified !== profile.emailVerified)) {
+        // A verified email newly claimed by this identity (changed, or just became verified) must not belong to a suspended
+        // user: otherwise a suspended person could take their old address over on a second account. Locked, same tx.
+        if (profile.emailVerified && (found.identity.email !== profile.email || !found.identity.emailVerified)
+          && (await config.store.emailBelongsToSuspendedUser(profile.email, tx))) {
+          throw new SuspendedSignal();
+        }
         // Returning user whose provider email changed: keep the stored identity current (it feeds the suspended-email
         // check). Same tx, so it commits or rolls back with the sign-in; a retry re-reads the identity and is idempotent.
         // A profile without an email never clears the stored one.
