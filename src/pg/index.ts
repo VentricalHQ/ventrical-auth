@@ -131,6 +131,11 @@ export function pgAuthStore(pool: pg.Pool): AuthStore<pg.PoolClient> {
       return r.rowCount ?? 0;
     },
 
+    async purgeExpiredSessions(now) {
+      const r = await pool.query('delete from sessions where expires_at <= $1', [now]);
+      return r.rowCount ?? 0;
+    },
+
     async isSuspendedCredential(idHash, now) {
       const r = await pool.query(
         `select 1 from sessions s join users u on u.id = s.user_id

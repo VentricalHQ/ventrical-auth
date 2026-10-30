@@ -100,6 +100,11 @@ export function createMemoryStore(): MemoryStore {
       for (const [h, s] of sessions) if (s.userId === userId) { sessions.delete(h); n++; }
       return n;
     },
+    async purgeExpiredSessions(now) {
+      let n = 0;
+      for (const [h, s] of sessions) if (s.expiresAt.getTime() <= now.getTime()) { sessions.delete(h); n++; }
+      return n;
+    },
     async isSuspendedCredential(idHash, now) {
       const s = sessions.get(idHash);
       return !!s && s.expiresAt.getTime() > now.getTime() && isSuspended(s.userId);

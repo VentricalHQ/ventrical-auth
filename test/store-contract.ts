@@ -158,6 +158,25 @@ export function storeContract(name: string, make: () => Promise<StoreHarness>): 
       expect(await store.transaction((tx) => store.deleteSessionsForUser(b.id, tx))).toBe(1);
     });
 
+    it('purgeExpiredSessions deletes only expired sessions (boundary inclusive) and returns the count', async () => {
+      const { store } = await fresh();
+      const a = await store.createUserWithIdentity({ ...IDENT, emailVerified: true });
+      const b = await store.createUserWithIdentity({ provider: 'github', subject: 'h9', emailVerified: true });
+      const now = new Date('2030-01-01T00:00:00.000Z');
+      expect(await store.purgeExpiredSessions(now)).toBe(0);
+      await session(store, a.id, 'past', new Date(now.getTime() - 1000));
+      await session(store, a.id, 'edge', new Date(now.getTime()));
+      await session(store, a.id, 'later', new Date(now.getTime() + 1));
+      await session(store, b.id, 'other', new Date(now.getTime() + 864e5));
+      expect(await store.purgeExpiredSessions(now)).toBe(2);
+      expect(await store.purgeExpiredSessions(now)).toBe(0);
+      const before = new Date(now.getTime() - 5000);
+      expect(await store.getSessionWithExpiry('later', before)).toBeDefined();
+      expect(await store.getSessionWithExpiry('other', before)).toBeDefined();
+      expect(await store.getSessionWithExpiry('past', before)).toBeUndefined();
+      expect(await store.getSessionWithExpiry('edge', before)).toBeUndefined();
+    });
+
     it('transaction commits on success and returns the result', async () => {
       const { store } = await fresh();
       const user = await store.transaction((tx) => store.createUserWithIdentity({ ...IDENT, emailVerified: true }, tx));
