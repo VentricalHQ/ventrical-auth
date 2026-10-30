@@ -103,9 +103,10 @@ export type CanCreateResult = { allow: true } | { allow: false; reason: string }
  *
  * stage: 'start' (GET /auth/:provider/start), 'callback' (GET /auth/:provider/callback, sign-in), 'link' (the same
  *   callback when it completes an account link for a signed-in user), 'logout' (POST /auth/logout and /auth/logout-everywhere).
- * code: an AuthHttpError code (invalid_state, oauth_error, provider_disabled, forbidden, unauthenticated, account_suspended),
+ * code: an AuthHttpError code (oauth_error, provider_disabled, forbidden, unauthenticated, account_suspended),
  *   'exchange_failed' (code exchange or ID-token verification threw), 'suspended', 'sign_in_failed', 'identity_in_use',
  *   'link_failed', 'internal_error' (unexpected throw), or the canCreateAccount deny reason.
+ *   invalid_state (a missing, forged, replayed or expired state cookie) and not_found are never reported: anyone can trigger them.
  *   A canCreateAccount reason is also placed in the sign-in redirect URL (?error=), so it must be a short code and
  *   must not embed PII (no emails, names or ids).
  * 'request' is the fallback stage for a failure that happens before the route is recognised (for example a

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createProviders, fetchGithubProfile, googleProfile, issOf, microsoftProfile, PROVIDER_ORDER } from '../src/providers.js';
 import { fakeIdp, makeKey, type SignOptions } from './helpers/fake-fetch.js';
 
@@ -441,6 +441,47 @@ describe('ID token signature verification (JWKS)', () => {
         await p.exchange();
         expect(idp.jwksCalls()).toBe(2);
       });
+    });
+  }
+});
+
+describe('github fetch timeouts', () => {
+  const hangingFetch = (signals: Array<AbortSignal | undefined>, hangAt: string) => (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    signals.push(init?.signal ?? undefined);
+    if (url === hangAt) {
+      return new Promise<Response>((_, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal!.reason));
+      });
+    }
+    if (url === 'https://github.com/login/oauth/access_token') return new Response(JSON.stringify({ access_token: 'gho_x' }));
+    if (url.endsWith('/user')) return new Response(JSON.stringify({ id: 7, login: 'o' }));
+    return new Response(JSON.stringify([{ email: 'm@x.com', primary: true, verified: true }]));
+  }) as typeof fetch;
+
+  it('passes an abort signal on the token POST and both profile GETs', async () => {
+    const signals: Array<AbortSignal | undefined> = [];
+    await mk(hangingFetch(signals, 'none')).github!.exchange('c', 'x', ctx);
+    expect(signals).toHaveLength(3);
+    for (const s of signals) expect(s).toBeInstanceOf(AbortSignal);
+  });
+
+  for (const [name, url] of [
+    ['token POST', 'https://github.com/login/oauth/access_token'],
+    ['user GET', 'https://api.github.com/user'],
+    ['emails GET', 'https://api.github.com/user/emails'],
+  ] as const) {
+    it(`a ${name} that never answers is aborted at the 5000 ms timeout and the exchange rejects`, async () => {
+      const ctl = new AbortController();
+      const spy = vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => ctl.signal);
+      try {
+        const signals: Array<AbortSignal | undefined> = [];
+        const result = mk(hangingFetch(signals, url)).github!.exchange('c', 'x', ctx).catch((e: Error) => e);
+        await new Promise((r) => setTimeout(r, 10));
+        expect(spy).toHaveBeenLastCalledWith(5000);
+        ctl.abort(new DOMException('timed out', 'TimeoutError'));
+        expect(await result).toBeInstanceOf(Error);
+      } finally { spy.mockRestore(); }
     });
   }
 });

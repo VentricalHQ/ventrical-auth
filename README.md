@@ -108,7 +108,10 @@ Routes served by `handle` (and so by `authRouter`):
 
 - `handle(request: Request): Promise<Response | undefined>` serves the auth routes. It returns `undefined` for any path it does not own, **and also for the wrong method on an owned path** (for example `POST /auth/providers`), so the host application decides what a 404 or 405 looks like.
 - `getSession(request)` returns `{ user, id, setCookie? }` (`user` is the `AuthUser` plus `verifiedEmail`) or `undefined`. When `setCookie` is present the session was refreshed and the caller must send it as `Set-Cookie`.
-**Warning: `user.email` is unverified provider data.** It is the first email the provider returned and it may not be verified. **Never use `user.email` for authorization, ownership, account matching or any security decision.** Only `user.verifiedEmail` may be used for that. `verifiedEmail` is `string | null`: the stored email of the identity this session signed in with, when that identity's email is verified, otherwise `null` (including a session with no identity). It follows later identity updates, so it can turn `null` if the provider stops vouching for the address. The same `user` shape (`id`, `email`, `name`, `verifiedEmail`) is what `req.user`, `request.user`, `c.get('user')` and the Next helpers expose. A custom store supplies it as the optional `verifiedEmail` on `getSessionWithExpiry`; when omitted it reads as `null`.
+
+  > **Warning**
+  >
+  > **`user.email` is unverified provider data.** It is the first email the provider returned and it may not be verified. **Never use `user.email` for authorization, ownership, account matching or any security decision.** Only `user.verifiedEmail` may be used for that. `verifiedEmail` is `string | null`: the stored email of the identity this session signed in with, when that identity's email is verified, otherwise `null` (including a session with no identity). It follows later identity updates, so it can turn `null` if the provider stops vouching for the address. The same `user` shape (`id`, `email`, `name`, `verifiedEmail`) is what `req.user`, `request.user`, `c.get('user')` and the Next helpers expose. A custom store supplies it as the optional `verifiedEmail` on `getSessionWithExpiry`; when omitted it reads as `null`.
 
 - `requireSession(request)` is like `getSession` but throws `AuthHttpError` (`401 unauthenticated`, or `403 account_suspended` when the cookie belongs to a currently suspended user).
 
@@ -202,12 +205,12 @@ All hooks are optional. `Tx` is the transaction handle type of your store.
   - `code`: see the table below. `provider` is set when the provider name is known. `errorName` is the error's class name, when an error was involved.
   - The event is built from a fixed whitelist. It **never carries** a message, stack, token, authorization code, JWKS, key material, response body, email or any other profile data, only the class name.
   - A throwing or rejecting `onError` is swallowed and never changes the response. The hook is awaited before the response is returned, for at most `onErrorTimeoutMs` (default 2000 ms), so keep it fast: hand slow work (network calls, queues) off instead of blocking on it.
-  - Success paths report nothing, and so do unknown routes and providers (`not_found`), to keep probing out of your logs. Calling `getSession` or `requireSession` directly is not reported; the caller handles those errors.
+  - Success paths report nothing, and so do unknown routes and providers (`not_found`) and a missing, forged, replayed or expired state cookie (`invalid_state`): anyone can trigger these, so they are kept out of your logs. Calling `getSession` or `requireSession` directly is not reported; the caller handles those errors.
 
   | Stage | Codes |
   | --- | --- |
   | `start` | `provider_disabled`, `internal_error` |
-  | `callback` | `invalid_state`, `oauth_error`, `provider_disabled`, `exchange_failed` (code exchange or ID-token and signature verification threw; the response is still `400 oauth_error`), `suspended`, `sign_in_failed`, the `canCreateAccount` deny reason, `internal_error` |
+  | `callback` | `oauth_error`, `provider_disabled`, `exchange_failed` (code exchange or ID-token and signature verification threw; the response is still `400 oauth_error`), `suspended`, `sign_in_failed`, the `canCreateAccount` deny reason, `internal_error` |
   | `link` | `identity_in_use`, `link_failed`, `internal_error` |
   | `logout` | `forbidden`, `unauthenticated`, `account_suspended`, `internal_error` |
 
@@ -302,7 +305,8 @@ Keep your own data in your own tables keyed by user id, not as extra columns on 
 
 ## Security notes
 
-- **Rate limiting:** the package does not rate-limit anything. Rate-limit `/auth/*` in your application (a reverse proxy or middleware in front of the auth routes).
+- **Rate limiting:** the package does no rate limiting at all. `/auth/*` must be rate limited by your application (a reverse proxy or middleware in front of the auth routes).
+- **`cookieDomain` weakens cookie isolation.** Setting it gives up the `__Host-` protection against cookie tossing (a sibling subdomain can set or overwrite the cookies) and exposes the session cookie to every subdomain of that domain. Leave it unset unless you need to share the cookie across subdomains you fully trust.
 - **Purge expired sessions on a schedule.** `store.purgeExpiredSessions(now: Date): Promise<number>` deletes every session with `expires_at <= now` and returns how many rows were removed. `pgAuthStore` supports it, and it is a required method of `AuthStore`, so custom stores must implement it. Example:
 
   ```ts

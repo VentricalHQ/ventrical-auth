@@ -110,10 +110,10 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
       if (timer !== undefined) clearTimeout(timer);
     }
   }
-  /** Reports a thrown error and turns it into the response. not_found is probing noise and is not reported. */
+  /** Reports a thrown error and turns it into the response. not_found and invalid_state are attacker-triggerable noise and are not reported. */
   async function fail(stage: string, err: unknown, provider?: ProviderName): Promise<Response> {
     const code = err instanceof AuthHttpError ? err.code : 'internal_error';
-    if (code !== 'not_found') await report(stage, code, provider, err);
+    if (code !== 'not_found' && code !== 'invalid_state') await report(stage, code, provider, err);
     return errorResponse(err);
   }
 

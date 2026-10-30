@@ -47,6 +47,8 @@ export function microsoftProfile(claims: Claims): ProviderProfile {
   return profile(sub, str(claims.preferred_username), false, str(claims.name));
 }
 
+const GITHUB_TIMEOUT_MS = 5000;
+
 export async function fetchGithubProfile(accessToken: string, fetchFn: typeof fetch = fetch, userAgent = 'ventrical-auth'): Promise<ProviderProfile> {
   const headers = {
     authorization: `Bearer ${accessToken}`,
@@ -54,12 +56,12 @@ export async function fetchGithubProfile(accessToken: string, fetchFn: typeof fe
     'user-agent': userAgent,
     'x-github-api-version': '2022-11-28',
   };
-  const userRes = await fetchFn('https://api.github.com/user', { headers });
+  const userRes = await fetchFn('https://api.github.com/user', { headers, signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS) });
   if (!userRes.ok) throw new Error('github user request failed');
   const user = (await userRes.json()) as Claims;
   if (typeof user.id !== 'number' && typeof user.id !== 'string') throw new Error('github user has no id');
 
-  const emailsRes = await fetchFn('https://api.github.com/user/emails', { headers });
+  const emailsRes = await fetchFn('https://api.github.com/user/emails', { headers, signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS) });
   if (!emailsRes.ok) throw new Error('github emails request failed');
   const emails = (await emailsRes.json()) as Array<{ email?: unknown; primary?: unknown; verified?: unknown }>;
   const best = Array.isArray(emails) ? emails.find((e) => e.primary === true && e.verified === true && str(e.email)) : undefined;
@@ -229,6 +231,7 @@ export function createProviders(opts: {
           method: 'POST',
           headers: { accept: 'application/json', 'content-type': 'application/x-www-form-urlencoded', 'user-agent': userAgent },
           body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, code, redirect_uri: redirect('github') }),
+          signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
         });
         if (!res.ok) throw new Error('github token request failed');
         const body = (await res.json()) as { access_token?: unknown };

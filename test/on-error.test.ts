@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createAuth, type AuthConfig, type AuthErrorEvent, type ProviderName, type ProviderProfile } from '../src/index.js';
 import { DuplicateIdentityError } from '../src/errors.js';
 import { fakeProvider } from './helpers/fake-provider.js';
@@ -38,7 +38,39 @@ describe('hooks.onError events', () => {
     const { auth, events } = setup({ google: prof('g1') });
     const res = (await auth.handle(req('GET', '/auth/google/callback?code=c&state=nope')))!;
     expect(res.status).toBe(400);
-    expect(events).toEqual([{ stage: 'callback', code: 'invalid_state', provider: 'google', errorName: 'AuthHttpError' }]);
+    expect(events).toEqual([]);
+  });
+
+  it('invalid_state is never reported (attacker-triggerable), while the response is unchanged', async () => {
+    const { auth, events } = setup({ google: prof('g1') });
+    const noCookie = (await auth.handle(req('GET', '/auth/google/callback?code=c&state=nope')))!;
+    const tampered = (await auth.handle(req('GET', '/auth/google/callback?code=c&state=x', { cookie: '__Host-ventrical_oauth=garbage' })))!;
+    for (const r of [noCookie, tampered]) {
+      expect(r.status).toBe(400);
+      expect((await r.json() as any).error.code).toBe('invalid_state');
+    }
+    expect(events).toEqual([]);
+  });
+
+  it('a GitHub exchange that times out is reported as exchange_failed with a plain 400 oauth_error', async () => {
+    const ctl = new AbortController();
+    const spy = vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => ctl.signal);
+    try {
+      const fetchFn = (async (_u: string | URL | Request, init?: RequestInit) => new Promise<Response>((_, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal!.reason));
+      })) as typeof fetch;
+      const { auth, events } = setup({}, { fetch: fetchFn });
+      const start = (await auth.handle(req('GET', '/auth/github/start')))!;
+      const oauth = `__Host-ventrical_oauth=${encodeURIComponent(setCookie(start, '__Host-ventrical_oauth')!.value)}`;
+      const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
+      const pending = auth.handle(req('GET', `/auth/github/callback?code=c&state=${encodeURIComponent(state)}`, { cookie: oauth }));
+      await new Promise((r) => setTimeout(r, 10));
+      ctl.abort(new DOMException('timed out', 'TimeoutError'));
+      const res = (await pending)!;
+      expect(res.status).toBe(400);
+      expect(await res.text()).not.toMatch(/timed out|TimeoutError/);
+      expect(events).toEqual([{ stage: 'callback', code: 'exchange_failed', provider: 'github', errorName: expect.any(String) }]);
+    } finally { spy.mockRestore(); }
   });
 
   it('oauth_error when the provider returned an error or no code', async () => {
@@ -231,7 +263,7 @@ describe('hooks.onError events', () => {
 
 describe('a misbehaving onError hook changes nothing', () => {
   const scenarios: Array<[string, (over: Partial<AuthConfig<MemoryTx>>) => Promise<Response>]> = [
-    ['invalid_state', async (o) => (await setup({ google: prof('g1') }, o).auth.handle(req('GET', '/auth/google/callback?code=c&state=nope')))!],
+    ['oauth_error', async (o) => flow(setup({ google: prof('g1') }, o).auth, 'google', { query: 'error=access_denied&state={state}' })],
     ['sign_in_failed', async (o) => flow(setup({ google: prof('g1') }, { ...o, hooks: { ...o.hooks, afterSignIn: async () => { throw new Error('x'); } } }).auth, 'google')],
     ['logout forbidden', async (o) => (await setup({ google: prof('g1') }, o).auth.handle(req('POST', '/auth/logout')))!],
     ['start provider_disabled', async (o) => (await setup({ google: prof('g1') }, o).auth.handle(req('GET', '/auth/microsoft/start')))!],
