@@ -57,7 +57,27 @@ export interface AuthStore<Tx = unknown> {
 
 export type CanCreateResult = { allow: true } | { allow: false; reason: string };
 
+/**
+ * Passed to hooks.onError for every non-success outcome. Built from a fixed whitelist: it never holds a message,
+ * stack, token, auth code, JWKS or response body, only the error class name.
+ *
+ * stage: 'start' (GET /auth/:provider/start), 'callback' (GET /auth/:provider/callback, sign-in), 'link' (the same
+ *   callback when it completes an account link for a signed-in user), 'logout' (POST /auth/logout and /auth/logout-everywhere).
+ * code: an AuthHttpError code (invalid_state, oauth_error, provider_disabled, forbidden, unauthenticated, account_suspended),
+ *   'exchange_failed' (code exchange or ID-token verification threw), 'suspended', 'sign_in_failed', 'identity_in_use',
+ *   'link_failed', 'internal_error' (unexpected throw), or the canCreateAccount deny reason.
+ */
+export interface AuthErrorEvent {
+  stage: string;
+  code: string;
+  provider?: ProviderName;
+  /** The error class name only, when an error was involved. */
+  errorName?: string;
+}
+
 export interface AuthHooks<Tx = unknown> {
+  /** Observes failures. A throwing or rejecting hook is swallowed and never changes the response. */
+  onError?(event: AuthErrorEvent): void | Promise<void>;
   canCreateAccount?(profile: ProviderProfile & { provider: ProviderName }): Promise<CanCreateResult>;
   /**
    * Runs inside the sign-in transaction. It may run twice if a duplicate-identity race

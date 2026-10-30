@@ -7,7 +7,7 @@ import { hashToken } from './crypto.js';
 import { AuthHttpError, DuplicateIdentityError } from './errors.js';
 import { PROVIDER_ORDER, createProviders, issOf, type AuthProvider } from './providers.js';
 import { SESSION_TTL_MS, makeSessions, newSessionId, type SessionResult } from './session.js';
-import type { AuthConfig, AuthUser, ProviderName, ProviderProfile } from './types.js';
+import type { AuthConfig, AuthErrorEvent, AuthUser, ProviderName, ProviderProfile } from './types.js';
 
 export const DEFAULT_COOKIE_NAMES = { session: 'ventrical_session', oauth: 'ventrical_oauth' } as const;
 
@@ -70,6 +70,36 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
     ...(config.cookieDomain ? { domain: config.cookieDomain } : {}),
   });
 
+  /** Class name only, never the message. Anything that is not a named object yields no name. */
+  const nameOf = (err: unknown): string | undefined => {
+    const n = typeof err === 'object' && err !== null ? (err as { constructor?: { name?: unknown } }).constructor?.name : undefined;
+    return typeof n === 'string' && n !== '' ? n : undefined;
+  };
+  const providerOf = (name: string): ProviderName | undefined =>
+    (PROVIDER_ORDER as readonly string[]).includes(name) ? (name as ProviderName) : undefined;
+  /** Whitelisted fields only. The hook is awaited but can neither throw into nor alter the response. */
+  async function report(stage: string, code: string, provider?: ProviderName, err?: unknown): Promise<void> {
+    const hook = config.hooks?.onError;
+    if (!hook) return;
+    const errorName = err === undefined ? undefined : nameOf(err);
+    const event: AuthErrorEvent = {
+      stage, code,
+      ...(provider !== undefined ? { provider } : {}),
+      ...(errorName !== undefined ? { errorName } : {}),
+    };
+    try {
+      await hook.call(config.hooks, event);
+    } catch {
+      // Swallowed: the package logs nothing.
+    }
+  }
+  /** Reports a thrown error and turns it into the response. not_found is probing noise and is not reported. */
+  async function fail(stage: string, err: unknown, provider?: ProviderName): Promise<Response> {
+    const code = err instanceof AuthHttpError ? err.code : 'internal_error';
+    if (code !== 'not_found') await report(stage, code, provider, err);
+    return errorResponse(err);
+  }
+
   const lookupProvider = (name: string): AuthProvider => {
     const p = Object.hasOwn(providers, name) ? providers[name as ProviderName] : undefined;
     if (p) return p;
@@ -125,7 +155,7 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
     return trimSlash(base) + safeRedirect(r.path);
   }
 
-  async function callback(request: Request, url: URL, name: string): Promise<Response> {
+  async function callback(request: Request, url: URL, name: string, ctx: { stage: string }): Promise<Response> {
     const provider = lookupProvider(name);
     const saved = openOAuthState(parseCookies(request.headers.get('cookie'))[cookieNames.oauth], config.encryptionKey);
     const state = url.searchParams.get('state') ?? '';
@@ -137,9 +167,10 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
     let raw: ProviderProfile;
     try {
       raw = await provider.exchange(code, saved.codeVerifier, { state: saved.state, nonce: saved.nonce ?? '', ...issOf(url.searchParams) });
-    } catch {
-      // Provider errors can embed codes, tokens or response bodies: drop them entirely.
-      throw new AuthHttpError(400, 'oauth_error', 'Sign-in failed');
+    } catch (err) {
+      // Provider errors can embed codes, tokens or response bodies: drop them entirely (only the class name is reported).
+      await report(ctx.stage, 'exchange_failed', provider.name, err);
+      return errorResponse(new AuthHttpError(400, 'oauth_error', 'Sign-in failed'));
     }
     const profile: ProviderProfile = {
       subject: raw.subject, emailVerified: raw.emailVerified === true,
@@ -148,7 +179,10 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
     };
     const target = resolveTarget(saved.redirect);
     const front = trimSlash(config.frontendUrl);
-    const signinError = (reason: string) => redirectTo(`${front}/signin?error=${encodeURIComponent(reason)}`);
+    const signinError = async (reason: string, err?: unknown) => {
+      await report(ctx.stage, reason, provider.name, err);
+      return redirectTo(`${front}/signin?error=${encodeURIComponent(reason)}`);
+    };
     const identity = {
       provider: provider.name, subject: profile.subject, emailVerified: profile.emailVerified,
       ...(profile.email !== undefined ? { email: profile.email } : {}),
@@ -157,6 +191,7 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
     // Linking needs the same session that began the flow (bound at /start) to still be current.
     const current = await sessions.getSession(request);
     if (current && saved.linkUserId === current.user.id) {
+      ctx.stage = 'link';
       let linkDuplicate = false;
       const owner = await config.store.transaction(async (tx) => {
         const existing = await config.store.findUserByIdentity(provider.name, profile.subject, tx);
@@ -167,8 +202,14 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
         linkDuplicate = true; // the transaction was abandoned; look again outside it
         return config.store.findUserByIdentity(provider.name, profile.subject);
       });
-      if (owner && owner.id !== current.user.id) return redirectTo(`${front}/settings?error=identity_in_use`);
-      if (linkDuplicate && !owner) return redirectTo(`${front}/settings?error=link_failed`);
+      if (owner && owner.id !== current.user.id) {
+        await report(ctx.stage, 'identity_in_use', provider.name);
+        return redirectTo(`${front}/settings?error=identity_in_use`);
+      }
+      if (linkDuplicate && !owner) {
+        await report(ctx.stage, 'link_failed', provider.name);
+        return redirectTo(`${front}/settings?error=link_failed`);
+      }
       return redirectTo(target, current.setCookie ? [current.setCookie] : []);
     }
 
@@ -176,11 +217,11 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
     let existing = await config.store.findUserByIdentity(provider.name, profile.subject);
     const suspendedEmail = !existing && profile.emailVerified && profile.email !== undefined ? profile.email : undefined;
     if (suspendedEmail !== undefined && (await config.store.emailBelongsToSuspendedUser(suspendedEmail))) {
-      return signinError('suspended');
+      return await signinError('suspended');
     }
     if (!existing && config.hooks?.canCreateAccount) {
       const verdict = await config.hooks.canCreateAccount({ ...profile, provider: provider.name });
-      if (!verdict.allow) return signinError(verdict.reason);
+      if (!verdict.allow) return await signinError(verdict.reason);
     }
 
     const { id, idHash } = newSessionId();
@@ -213,18 +254,19 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
         await attempt(existing);
       }
     } catch (err) {
-      return signinError(err instanceof SuspendedSignal ? 'suspended' : 'sign_in_failed');
+      return err instanceof SuspendedSignal ? await signinError('suspended') : await signinError('sign_in_failed', err);
     }
     // Only after the transaction has committed.
     return redirectTo(target, [sessions.sessionCookie(id)]);
   }
 
   async function callbackRoute(request: Request, url: URL, name: string): Promise<Response> {
+    const ctx = { stage: 'callback' };
     let res: Response;
     try {
-      res = await callback(request, url, name);
+      res = await callback(request, url, name, ctx);
     } catch (err) {
-      res = errorResponse(err);
+      res = await fail(ctx.stage, err, providerOf(name));
     }
     // The state cookie is single-use: cleared on every path, errors included, so a replay fails with invalid_state.
     res.headers.append('set-cookie', clearCookie(cookieNames.oauth, cookieOpts(0)));
@@ -249,6 +291,8 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
   }
 
   async function handle(request: Request): Promise<Response | undefined> {
+    let stage = 'request';
+    let provider: ProviderName | undefined;
     try {
       const url = new URL(request.url);
       const path = url.pathname;
@@ -256,15 +300,20 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
       if (method === 'GET' && path === '/auth/providers') {
         return json(200, { providers: PROVIDER_ORDER.filter((n) => Object.hasOwn(providers, n)) });
       }
+      if (method === 'POST' && (path === '/auth/logout' || path === '/auth/logout-everywhere')) stage = 'logout';
       if (method === 'POST' && path === '/auth/logout') return await logout(request);
       if (method === 'POST' && path === '/auth/logout-everywhere') return await logoutEverywhere(request);
       const m = method === 'GET' ? /^\/auth\/([^/]+)\/start$/.exec(path) : null;
-      if (m) return await start(request, url, safeDecode(m[1]!));
+      if (m) {
+        stage = 'start';
+        provider = providerOf(safeDecode(m[1]!));
+        return await start(request, url, safeDecode(m[1]!));
+      }
       const cb = method === 'GET' ? /^\/auth\/([^/]+)\/callback$/.exec(path) : null;
       if (cb) return await callbackRoute(request, url, safeDecode(cb[1]!));
       return undefined;
     } catch (err) {
-      return errorResponse(err);
+      return await fail(stage, err, provider);
     }
   }
 

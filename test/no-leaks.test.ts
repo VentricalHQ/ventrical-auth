@@ -26,6 +26,7 @@ let output: string[] = [];
 const spies: Array<{ mockRestore(): void }> = [];
 beforeEach(() => {
   output = [];
+  errorEvents = [];
   const record = (...a: unknown[]) => { output.push(a.map((x) => (typeof x === 'string' ? x : safeJson(x))).join(' ')); };
   for (const m of ['log', 'info', 'warn', 'error', 'debug', 'trace', 'dir', 'table', 'group', 'groupEnd', 'assert'] as const) {
     spies.push(vi.spyOn(console, m).mockImplementation(record as never));
@@ -43,13 +44,17 @@ function safeJson(x: unknown): string {
 async function expectNoLeak(label: string, ...responses: Response[]): Promise<void> {
   for (const r of responses) expect(leaksIn(await dump(r)), `${label}: response`).toEqual([]);
   expect(leaksIn(output.join('\n')), `${label}: console/stdout/stderr`).toEqual([]);
+  expect(leaksIn(JSON.stringify(errorEvents)), `${label}: onError events`).toEqual([]);
 }
 
+/** Every onError event of the run; scanned for the plant like any other output. */
+let errorEvents: unknown[] = [];
 function base(over: Partial<AuthConfig<MemoryTx>> = {}) {
   const store = createMemoryStore();
   const auth = createAuth<MemoryTx>({
     providers: { google: { clientId: 'gid', clientSecret: PLANT }, github: { clientId: 'ghid', clientSecret: PLANT } },
     publicUrl: PUBLIC, frontendUrl: FRONT, encryptionKey: KEY, store, ...over,
+    hooks: { ...over.hooks, onError: (e) => { errorEvents.push(e); } },
   });
   return { auth, store };
 }
@@ -120,6 +125,24 @@ describe('planted secret never leaves (provider override)', () => {
     const s = await start(auth, 'google');
     const cb = await callback(auth, 'google', s);
     await expectNoLeak('store error', s.res, cb);
+  });
+
+  it('onError events carry the class name only, never the planted message', async () => {
+    class PlantedError extends Error {}
+    const { s, cb } = await run(new PlantedError(`upstream said code=${PLANT} token=${PLANT}`));
+    expect(cb.status).toBe(400);
+    expect(errorEvents).toEqual([{ stage: 'callback', code: 'exchange_failed', provider: 'google', errorName: 'PlantedError' }]);
+    await expectNoLeak('onError exchange', s.res, cb);
+
+    errorEvents = [];
+    const { auth } = base({
+      providerOverrides: { google: fakeProvider('google', ok()) } as never,
+      hooks: { afterSignIn: async () => { throw new Error(`hook ${PLANT}`); } },
+    });
+    const s2 = await start(auth, 'google');
+    const cb2 = await callback(auth, 'google', s2);
+    expect(errorEvents).toEqual([{ stage: 'callback', code: 'sign_in_failed', provider: 'google', errorName: 'Error' }]);
+    await expectNoLeak('onError afterSignIn', s2.res, cb2);
   });
 
   it('a hook error carrying the plant does not reach the response', async () => {

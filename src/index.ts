@@ -38,6 +38,8 @@ function validateConfig(config: AuthConfig<any>): void {
   if (!isHttpUrl(config.publicUrl)) throw new Error('Invalid auth config: publicUrl must be an http or https URL');
   if (!isHttpUrl(config.frontendUrl)) throw new Error('Invalid auth config: frontendUrl must be an http or https URL');
   if (!config.store) throw new Error('Invalid auth config: store is required');
+  const onError: unknown = config.hooks?.onError;
+  if (onError !== undefined && typeof onError !== 'function') throw new Error('Invalid auth config: hooks.onError must be a function');
   const ttl = config.sessionTtlMs;
   if (ttl !== undefined && !(typeof ttl === 'number' && Number.isFinite(ttl) && ttl > 0)) {
     throw new Error('Invalid auth config: sessionTtlMs must be a positive finite number');
