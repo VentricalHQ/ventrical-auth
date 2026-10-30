@@ -6,7 +6,7 @@ Please report security vulnerabilities privately. Do not file public issues, pul
 
 You can report in either of these ways:
 
-- Email: [security contact, to be confirmed by Ashwin]
+- Email: ventrical.contact@ventricalhq.com
 - GitHub private vulnerability reporting: open the repository's Security tab and choose "Report a vulnerability".
 
 Please include:
