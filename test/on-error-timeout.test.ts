@@ -87,6 +87,11 @@ describe('onErrorTimeoutMs validation', () => {
   it.each([0, -1, NaN, Infinity, '5', null])('rejects %s without echoing it', (v) => {
     expect(build(v)).toThrow('onErrorTimeoutMs must be a positive finite number');
   });
+  it('rejects values above the setTimeout maximum without echoing them', () => {
+    expect(build(2147483648)).toThrow('onErrorTimeoutMs must be a positive finite number no greater than 2147483647');
+    expect(build(2147483648)).not.toThrow(/2147483648/);
+    expect(build(2147483647)).not.toThrow();
+  });
   it('does not echo the value', () => {
     expect(build('SECRET-VALUE')).not.toThrow(/SECRET-VALUE/);
   });

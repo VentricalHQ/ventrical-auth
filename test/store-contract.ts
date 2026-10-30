@@ -30,8 +30,8 @@ export function storeContract(name: string, make: () => Promise<StoreHarness>): 
     it('creates a user with an identity and finds it by identity', async () => {
       const { store } = await fresh();
       const user = await store.createUserWithIdentity({ ...IDENT, email: 'a@example.test', emailVerified: true, name: 'Ann' });
-      expect(user).toMatchObject({ email: 'a@example.test', name: 'Ann' });
-      expect(await store.findUserByIdentity('google', 'g1')).toMatchObject(user);
+      expect(user).toEqual({ id: user.id, email: 'a@example.test', name: 'Ann' });
+      expect(await store.findUserByIdentity('google', 'g1')).toEqual({ ...user, identity: { email: 'a@example.test', emailVerified: true } });
       expect(await store.findUserByIdentity('google', 'other')).toBeUndefined();
       expect(await store.findUserByIdentity('github', 'g1')).toBeUndefined();
     });
@@ -250,7 +250,7 @@ export function storeContract(name: string, make: () => Promise<StoreHarness>): 
     it('transaction commits on success and returns the result', async () => {
       const { store } = await fresh();
       const user = await store.transaction((tx) => store.createUserWithIdentity({ ...IDENT, emailVerified: true }, tx));
-      expect(await store.findUserByIdentity('google', 'g1')).toMatchObject(user);
+      expect(await store.findUserByIdentity('google', 'g1')).toEqual({ ...user, identity: { email: null, emailVerified: true } });
     });
 
     it('transaction rolls back on throw and rethrows the original error', async () => {

@@ -41,8 +41,8 @@ function validateConfig(config: AuthConfig<any>): void {
   const onError: unknown = config.hooks?.onError;
   if (onError !== undefined && typeof onError !== 'function') throw new Error('Invalid auth config: hooks.onError must be a function');
   const hookTimeout: unknown = config.onErrorTimeoutMs;
-  if (hookTimeout !== undefined && !(typeof hookTimeout === 'number' && Number.isFinite(hookTimeout) && hookTimeout > 0)) {
-    throw new Error('Invalid auth config: onErrorTimeoutMs must be a positive finite number');
+  if (hookTimeout !== undefined && !(typeof hookTimeout === 'number' && Number.isFinite(hookTimeout) && hookTimeout > 0 && hookTimeout <= 2147483647)) {
+    throw new Error('Invalid auth config: onErrorTimeoutMs must be a positive finite number no greater than 2147483647');
   }
   const ttl = config.sessionTtlMs;
   if (ttl !== undefined && !(typeof ttl === 'number' && Number.isFinite(ttl) && ttl > 0)) {
