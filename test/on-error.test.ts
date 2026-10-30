@@ -34,13 +34,6 @@ const signedIn = async (auth: Auth, p: string) => `__Host-ventrical_session=${se
 const snap = async (r: Response) => JSON.stringify([r.status, [...r.headers].filter(([k]) => k !== 'set-cookie'), r.headers.getSetCookie().map((c) => c.replace(/=[^;]*/, '=')), await r.clone().text()]);
 
 describe('hooks.onError events', () => {
-  it('invalid_state', async () => {
-    const { auth, events } = setup({ google: prof('g1') });
-    const res = (await auth.handle(req('GET', '/auth/google/callback?code=c&state=nope')))!;
-    expect(res.status).toBe(400);
-    expect(events).toEqual([]);
-  });
-
   it('invalid_state is never reported (attacker-triggerable), while the response is unchanged', async () => {
     const { auth, events } = setup({ google: prof('g1') });
     const noCookie = (await auth.handle(req('GET', '/auth/google/callback?code=c&state=nope')))!;

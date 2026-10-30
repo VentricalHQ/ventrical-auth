@@ -108,12 +108,11 @@ Routes served by `handle` (and so by `authRouter`):
 
 - `handle(request: Request): Promise<Response | undefined>` serves the auth routes. It returns `undefined` for any path it does not own, **and also for the wrong method on an owned path** (for example `POST /auth/providers`), so the host application decides what a 404 or 405 looks like.
 - `getSession(request)` returns `{ user, id, setCookie? }` (`user` is the `AuthUser` plus `verifiedEmail`) or `undefined`. When `setCookie` is present the session was refreshed and the caller must send it as `Set-Cookie`.
-
-  > **Warning**
-  >
-  > **`user.email` is unverified provider data.** It is the first email the provider returned and it may not be verified. **Never use `user.email` for authorization, ownership, account matching or any security decision.** Only `user.verifiedEmail` may be used for that. `verifiedEmail` is `string | null`: the stored email of the identity this session signed in with, when that identity's email is verified, otherwise `null` (including a session with no identity). It follows later identity updates, so it can turn `null` if the provider stops vouching for the address. The same `user` shape (`id`, `email`, `name`, `verifiedEmail`) is what `req.user`, `request.user`, `c.get('user')` and the Next helpers expose. A custom store supplies it as the optional `verifiedEmail` on `getSessionWithExpiry`; when omitted it reads as `null`.
-
 - `requireSession(request)` is like `getSession` but throws `AuthHttpError` (`401 unauthenticated`, or `403 account_suspended` when the cookie belongs to a currently suspended user).
+
+> **Warning**
+>
+> **`user.email` is unverified provider data.** It is the first email the provider returned and it may not be verified. **Never use `user.email` for authorization, ownership, account matching or any security decision.** Only `user.verifiedEmail` may be used for that. `verifiedEmail` is `string | null`: the stored email of the identity this session signed in with, when that identity's email is verified, otherwise `null` (including a session with no identity). It follows later identity updates, so it can turn `null` if the provider stops vouching for the address. The same `user` shape (`id`, `email`, `name`, `verifiedEmail`) is what `req.user`, `request.user`, `c.get('user')` and the Next helpers expose. A custom store supplies it as the optional `verifiedEmail` on `getSessionWithExpiry`; when omitted it reads as `null`.
 
 The core never touches Express's `req` or `res`. Cookies are read from the `Cookie` header and written as `Set-Cookie` headers on the `Response`; redirects are `Response` objects with a `Location` header.
 
