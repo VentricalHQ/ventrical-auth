@@ -25,7 +25,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node -e \"require('node:fs').cpSync('src/pg/migrations','dist/pg/migrations',{recursive:true})\"",
     "test": "vitest run",
     "prepare": "npm run build"
   },
