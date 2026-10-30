@@ -16,6 +16,18 @@
       "types": "./dist/express/index.d.ts",
       "import": "./dist/express/index.js"
     },
+    "./next": {
+      "types": "./dist/next/index.d.ts",
+      "import": "./dist/next/index.js"
+    },
+    "./hono": {
+      "types": "./dist/hono/index.d.ts",
+      "import": "./dist/hono/index.js"
+    },
+    "./fastify": {
+      "types": "./dist/fastify/index.d.ts",
+      "import": "./dist/fastify/index.js"
+    },
     "./pg": {
       "types": "./dist/pg/index.d.ts",
       "import": "./dist/pg/index.js"
@@ -31,10 +43,22 @@
     "prepare": "npm run build"
   },
   "peerDependencies": {
-    "express": "^5"
+    "express": "^5",
+    "fastify": "^5",
+    "hono": "^4",
+    "next": ">=14"
   },
   "peerDependenciesMeta": {
     "express": {
+      "optional": true
+    },
+    "fastify": {
+      "optional": true
+    },
+    "hono": {
+      "optional": true
+    },
+    "next": {
       "optional": true
     }
   },
@@ -48,6 +72,8 @@
     "@types/node": "^22",
     "@types/pg": "^8.23.1",
     "express": "^5.3.0",
+    "fastify": "^5.12.5",
+    "hono": "^4.13.13",
     "typescript": "^7.0.2",
     "vitest": "^5.0.5"
   }
