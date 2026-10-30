@@ -94,7 +94,8 @@ export interface AuthErrorEvent {
 export interface AuthHooks<Tx = unknown> {
   /**
    * Observes failures. A throwing or rejecting hook is swallowed and never changes the response.
-   * It is awaited before the response is returned, so keep it fast (hand slow work off, do not block on it).
+   * It is awaited before the response is returned, but for at most `onErrorTimeoutMs` (default 2000): after that the
+   * response goes out anyway and the hook's eventual result, including a rejection, is ignored. Keep it fast.
    */
   onError?(event: AuthErrorEvent): void | Promise<void>;
   canCreateAccount?(profile: ProviderProfile & { provider: ProviderName }): Promise<CanCreateResult>;
@@ -127,6 +128,8 @@ export interface AuthConfig<Tx = unknown> {
   cookieNames?: { session?: string; oauth?: string };
   cookieDomain?: string;
   sessionTtlMs?: number;
+  /** Longest the handler waits for hooks.onError before responding anyway. Positive, finite; default 2000. */
+  onErrorTimeoutMs?: number;
   clock?: () => Date;
   fetch?: typeof fetch;
   userAgent?: string;

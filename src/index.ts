@@ -40,6 +40,10 @@ function validateConfig(config: AuthConfig<any>): void {
   if (!config.store) throw new Error('Invalid auth config: store is required');
   const onError: unknown = config.hooks?.onError;
   if (onError !== undefined && typeof onError !== 'function') throw new Error('Invalid auth config: hooks.onError must be a function');
+  const hookTimeout: unknown = config.onErrorTimeoutMs;
+  if (hookTimeout !== undefined && !(typeof hookTimeout === 'number' && Number.isFinite(hookTimeout) && hookTimeout > 0)) {
+    throw new Error('Invalid auth config: onErrorTimeoutMs must be a positive finite number');
+  }
   const ttl = config.sessionTtlMs;
   if (ttl !== undefined && !(typeof ttl === 'number' && Number.isFinite(ttl) && ttl > 0)) {
     throw new Error('Invalid auth config: sessionTtlMs must be a positive finite number');

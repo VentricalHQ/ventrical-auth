@@ -9,6 +9,8 @@ import { PROVIDER_ORDER, createProviders, issOf, type AuthProvider } from './pro
 import { SESSION_TTL_MS, makeSessions, newSessionId, type SessionResult } from './session.js';
 import type { AuthConfig, AuthErrorEvent, AuthUser, ProviderName, ProviderProfile } from './types.js';
 
+const DEFAULT_ON_ERROR_TIMEOUT_MS = 2000;
+
 export const DEFAULT_COOKIE_NAMES = { session: 'ventrical_session', oauth: 'ventrical_oauth' } as const;
 
 export interface Auth {
@@ -81,6 +83,7 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
   async function report(stage: string, code: string, provider?: ProviderName, err?: unknown): Promise<void> {
     const hook = config.hooks?.onError;
     if (!hook) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const errorName = err === undefined ? undefined : nameOf(err);
       const event: AuthErrorEvent = {
@@ -88,9 +91,15 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
         ...(provider !== undefined ? { provider } : {}),
         ...(errorName !== undefined ? { errorName } : {}),
       };
-      await hook.call(config.hooks, event);
+      // A sync throw lands in the catch below; a late rejection is absorbed so it can never go unhandled.
+      const running = Promise.resolve(hook.call(config.hooks, event));
+      running.catch(() => undefined);
+      const timedOut = new Promise<void>((resolve) => { timer = setTimeout(resolve, config.onErrorTimeoutMs ?? DEFAULT_ON_ERROR_TIMEOUT_MS); });
+      await Promise.race([running, timedOut]);
     } catch {
       // Swallowed: the package logs nothing.
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
   /** Reports a thrown error and turns it into the response. not_found is probing noise and is not reported. */
