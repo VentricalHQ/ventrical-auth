@@ -33,4 +33,41 @@ describe('createAuth config validation', () => {
     expect(msg).toMatch(/publicUrl/);
     expect(msg).not.toContain(bad);
   });
+
+  it('does not echo a wrong-length encryptionKey in the message', () => {
+    const key = Buffer.from('super-secret-key-material');
+    let msg = '';
+    try {
+      createAuth({ ...base(), encryptionKey: key });
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    expect(msg).toMatch(/encryptionKey/);
+    expect(msg).not.toContain(key.toString());
+    expect(msg).not.toContain(key.toString('hex'));
+    expect(msg).not.toContain(key.toString('base64'));
+  });
+
+  it.each(['ftp://x.example.test', 'javascript:alert(1)', 'file:///etc/passwd'])('rejects non-http(s) URL %s', (bad) => {
+    expect(() => createAuth({ ...base(), publicUrl: bad })).toThrow(/publicUrl/);
+    expect(() => createAuth({ ...base(), frontendUrl: bad })).toThrow(/frontendUrl/);
+  });
+
+  it('accepts http URLs', () => {
+    expect(() => createAuth({ ...base(), publicUrl: 'http://localhost:3000', frontendUrl: 'http://localhost:5173' })).not.toThrow();
+  });
+
+  it('requires non-empty provider credentials and microsoft tenant', () => {
+    expect(() => createAuth({ ...base(), providers: { google: { clientId: '', clientSecret: 's' } } })).toThrow(/providers\.google\.clientId/);
+    expect(() => createAuth({ ...base(), providers: { github: { clientId: 'i', clientSecret: '' } } })).toThrow(/providers\.github\.clientSecret/);
+    expect(() => createAuth({ ...base(), providers: { microsoft: { clientId: 'i', clientSecret: 's', tenant: '' } } })).toThrow(/tenant/);
+  });
+
+  it.each([0, -1, NaN, Infinity, '5' as unknown as number])('rejects sessionTtlMs %s', (v) => {
+    expect(() => createAuth({ ...base(), sessionTtlMs: v })).toThrow(/sessionTtlMs/);
+  });
+
+  it('accepts a positive sessionTtlMs', () => {
+    expect(() => createAuth({ ...base(), sessionTtlMs: 1000 })).not.toThrow();
+  });
 });

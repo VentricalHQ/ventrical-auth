@@ -45,32 +45,21 @@ export function makeSessions(cfg: SessionsConfig) {
   }
 
   function readId(request: Request): string | undefined {
-    try {
-      const id = parseCookies(request.headers.get('cookie'))[cfg.cookieNames.session];
-      return id || undefined;
-    } catch {
-      return undefined;
-    }
+    return parseCookies(request.headers.get('cookie'))[cfg.cookieNames.session] || undefined;
   }
 
   async function lookup(request: Request, now: Date): Promise<SessionResult | undefined> {
     const id = readId(request);
     if (!id) return undefined;
-    try {
-      const idHash = hashToken(id);
-      const found = await cfg.store.getSessionWithExpiry(idHash, now);
-      if (!found) return undefined;
-      const result: SessionResult = { user: found.user, id };
-      if (found.expiresAt.getTime() - now.getTime() < REFRESH_BELOW_MS) {
-        await cfg.store.touchSession(idHash, new Date(now.getTime() + cfg.sessionTtlMs));
-        result.setCookie = sessionCookie(id);
-      }
-      return result;
-    } catch (err) {
-      // Only a malformed cookie value is "signed out"; store failures must surface.
-      if (err instanceof URIError) return undefined;
-      throw err;
+    const idHash = hashToken(id);
+    const found = await cfg.store.getSessionWithExpiry(idHash, now);
+    if (!found) return undefined;
+    const result: SessionResult = { user: found.user, id };
+    if (found.expiresAt.getTime() - now.getTime() < REFRESH_BELOW_MS) {
+      await cfg.store.touchSession(idHash, new Date(now.getTime() + cfg.sessionTtlMs));
+      result.setCookie = sessionCookie(id);
     }
+    return result;
   }
 
   async function getSession(request: Request): Promise<SessionResult | undefined> {

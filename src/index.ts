@@ -3,15 +3,17 @@ import type { AuthConfig } from './types.js';
 export * from './types.js';
 export { AuthHttpError, DuplicateIdentityError, SUSPENDED_MESSAGE } from './errors.js';
 
-function isUrl(v: unknown): boolean {
+function isHttpUrl(v: unknown): boolean {
   if (typeof v !== 'string') return false;
   try {
-    new URL(v);
-    return true;
+    const u = new URL(v);
+    return u.protocol === 'http:' || u.protocol === 'https:';
   } catch {
     return false;
   }
 }
+
+const nonEmpty = (v: unknown): boolean => typeof v === 'string' && v !== '';
 
 /** Validates config. Error messages name the bad field, never its value. */
 function validateConfig(config: AuthConfig<any>): void {
@@ -22,9 +24,23 @@ function validateConfig(config: AuthConfig<any>): void {
   if (!p || !(p.google || p.microsoft || p.github)) {
     throw new Error('Invalid auth config: providers must configure at least one provider');
   }
-  if (!isUrl(config.publicUrl)) throw new Error('Invalid auth config: publicUrl must be a valid URL');
-  if (!isUrl(config.frontendUrl)) throw new Error('Invalid auth config: frontendUrl must be a valid URL');
+  for (const name of ['google', 'microsoft', 'github'] as const) {
+    const c = p[name];
+    if (c === undefined) continue;
+    if (!c || typeof c !== 'object') throw new Error(`Invalid auth config: providers.${name} must be an object`);
+    if (!nonEmpty(c.clientId)) throw new Error(`Invalid auth config: providers.${name}.clientId must be a non-empty string`);
+    if (!nonEmpty(c.clientSecret)) throw new Error(`Invalid auth config: providers.${name}.clientSecret must be a non-empty string`);
+  }
+  if (p.microsoft && !nonEmpty(p.microsoft.tenant)) {
+    throw new Error('Invalid auth config: providers.microsoft.tenant must be a non-empty string');
+  }
+  if (!isHttpUrl(config.publicUrl)) throw new Error('Invalid auth config: publicUrl must be an http or https URL');
+  if (!isHttpUrl(config.frontendUrl)) throw new Error('Invalid auth config: frontendUrl must be an http or https URL');
   if (!config.store) throw new Error('Invalid auth config: store is required');
+  const ttl = config.sessionTtlMs;
+  if (ttl !== undefined && !(typeof ttl === 'number' && Number.isFinite(ttl) && ttl > 0)) {
+    throw new Error('Invalid auth config: sessionTtlMs must be a positive finite number');
+  }
 }
 
 /** Stub: validates config; the full implementation lands in later tasks. */
