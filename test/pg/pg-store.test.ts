@@ -81,9 +81,32 @@ describe.skipIf(!URL_ENV)('pgAuthStore (live postgres)', () => {
       expect(h.pool.idleCount).toBeGreaterThanOrEqual(idleBefore);
     });
 
+    it('a failing ROLLBACK rethrows the original error and destroys the client', async () => {
+      const released: unknown[] = [];
+      const wrapped = {
+        connect: async () => {
+          const client = await h.pool.connect();
+          const query = client.query.bind(client) as (...a: unknown[]) => Promise<unknown>;
+          (client as unknown as { query: unknown }).query = (...a: unknown[]) =>
+            (a[0] === 'ROLLBACK' ? Promise.reject(new Error('rollback boom')) : query(...a));
+          const release = client.release.bind(client);
+          client.release = ((err?: Error | boolean) => { released.push(err); release(err); }) as typeof client.release;
+          return client;
+        },
+      } as unknown as pg.Pool;
+      const total = h.pool.totalCount;
+      await expect(pgAuthStore(wrapped).transaction(async () => { throw new Error('original'); })).rejects.toThrow('original');
+      expect(released).toHaveLength(1);
+      expect(released[0]).toBeInstanceOf(Error);
+      expect((released[0] as Error).message).toBe('rollback boom');
+      // A destroyed client leaves the pool instead of going idle.
+      expect(h.pool.totalCount).toBeLessThanOrEqual(total);
+      expect(h.pool.totalCount - h.pool.idleCount).toBe(0);
+    });
+
     async function waitForLockWait(): Promise<void> {
       for (let i = 0; i < 200; i++) {
-        const r = await admin.query(`select 1 from pg_stat_activity where wait_event_type = 'Lock' and datname = current_database()`);
+        const r = await admin.query(`select 1 from pg_stat_activity where wait_event_type = 'Lock' and datname = current_database() and query ilike '%suspended_at%'`);
         if (r.rowCount) return;
         await new Promise((r) => setTimeout(r, 25));
       }
@@ -101,12 +124,16 @@ describe.skipIf(!URL_ENV)('pgAuthStore (live postgres)', () => {
         inserted();
         await gate;
       });
-      await insertedP;
       let suspended = false;
-      const suspendP = h.pool.query('update users set suspended_at = now() where id = $1', [u.id]).then(() => { suspended = true; });
-      await waitForLockWait();
-      expect(suspended).toBe(false);
-      release();
+      let suspendP: Promise<void> = Promise.resolve();
+      try {
+        await insertedP;
+        suspendP = h.pool.query('update users set suspended_at = now() where id = $1', [u.id]).then(() => { suspended = true; });
+        await waitForLockWait();
+        expect(suspended).toBe(false);
+      } finally {
+        release();
+      }
       await txP;
       await suspendP;
       // The session was committed before the suspension, so it is now hidden and flagged.
@@ -127,12 +154,16 @@ describe.skipIf(!URL_ENV)('pgAuthStore (live postgres)', () => {
         checked();
         await gate;
       });
-      await checkedP;
       let suspended = false;
-      const suspendP = h.pool.query('update users set suspended_at = now() where id = $1', [u.id]).then(() => { suspended = true; });
-      await waitForLockWait();
-      expect(suspended).toBe(false);
-      release();
+      let suspendP: Promise<void> = Promise.resolve();
+      try {
+        await checkedP;
+        suspendP = h.pool.query('update users set suspended_at = now() where id = $1', [u.id]).then(() => { suspended = true; });
+        await waitForLockWait();
+        expect(suspended).toBe(false);
+      } finally {
+        release();
+      }
       await txP;
       await suspendP;
       expect(await h.store.emailBelongsToSuspendedUser('race2@example.test')).toBe(true);

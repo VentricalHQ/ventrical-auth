@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createAuth, AuthHttpError, type ProviderName, type ProviderProfile } from '../src/index.js';
 import { authRouter, requireSession } from '../src/express/index.js';
+import { newSessionId } from '../src/session.js';
 import { fakeProvider } from './helpers/fake-provider.js';
 import { createMemoryStore, type MemoryTx } from './helpers/memory-store.js';
 
@@ -88,7 +89,6 @@ describe('express adapter', () => {
     expect((await anon.json() as any).error.code).toBe('unauthenticated');
 
     const user = await store.createUserWithIdentity({ provider: 'google', subject: 'g9', emailVerified: true });
-    const { newSessionId } = await import('../src/session.js');
     const sid = newSessionId();
     await store.transaction((tx) => store.createSessionUnlessSuspended(user.id, sid.idHash, new Date(Date.now() + 864e5), { provider: 'google', subject: 'g9' }, tx));
     const ok = await get(`${base}/me`, { cookie: `ventrical_session=${sid.id}` });
@@ -141,7 +141,6 @@ describe('express adapter', () => {
 
   async function seedSession(store: ReturnType<typeof setup>['store'], expiresAt: Date, subject = 'g5') {
     const user = await store.createUserWithIdentity({ provider: 'google', subject, emailVerified: true });
-    const { newSessionId } = await import('../src/session.js');
     const sid = newSessionId();
     await store.transaction((tx) => store.createSessionUnlessSuspended(user.id, sid.idHash, expiresAt, { provider: 'google', subject }, tx));
     return sid;
@@ -189,5 +188,24 @@ describe('express adapter', () => {
     expect(await raw('http://evil.example.test/auth/providers', 'GET')).toMatch(/^HTTP\/1.1 418/);
     expect(await raw('*', 'OPTIONS')).toMatch(/^HTTP\/1.1 418/);
     expect(seen).toEqual([]);
+  });
+
+  it('requireSession answers 401 and skips the handler for absolute-form and asterisk request targets', async () => {
+    let ran = 0;
+    const base = await listen((app, a) => {
+      app.use(requireSession(a));
+      app.use((_req, res) => { ran++; res.status(200).end(); });
+    });
+    const port = Number(new URL(base).port);
+    const raw = (target: string, method: string) => new Promise<string>((resolve, reject) => {
+      const sock = net.connect(port, '127.0.0.1', () => sock.write(`${method} ${target} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n`));
+      let out = '';
+      sock.on('data', (d) => { out += d.toString(); });
+      sock.on('end', () => resolve(out));
+      sock.on('error', reject);
+    });
+    expect(await raw('http://evil.example.test/me', 'GET')).toMatch(/^HTTP\/1.1 401/);
+    expect(await raw('*', 'OPTIONS')).toMatch(/^HTTP\/1.1 401/);
+    expect(ran).toBe(0);
   });
 });
