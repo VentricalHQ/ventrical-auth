@@ -1,3 +1,4 @@
+import { createHandler, type Auth } from './handler.js';
 import type { AuthConfig } from './types.js';
 
 export * from './types.js';
@@ -43,8 +44,10 @@ function validateConfig(config: AuthConfig<any>): void {
   }
 }
 
-/** Stub: validates config; the full implementation lands in later tasks. */
-export function createAuth<Tx = unknown>(config: AuthConfig<Tx>): { config: AuthConfig<Tx> } {
+export type { Auth } from './handler.js';
+
+/** Validates config and returns the framework-neutral core: `handle`, `getSession`, `requireSession`. */
+export function createAuth<Tx = unknown>(config: AuthConfig<Tx>): Auth {
   validateConfig(config);
-  return { config };
+  return createHandler(config);
 }

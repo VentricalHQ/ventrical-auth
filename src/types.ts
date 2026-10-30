@@ -1,3 +1,5 @@
+import type { AuthProvider } from './providers.js';
+
 export type ProviderName = 'google' | 'microsoft' | 'github';
 
 export interface ProviderProfile {
@@ -78,4 +80,9 @@ export interface AuthConfig<Tx = unknown> {
   clock?: () => Date;
   fetch?: typeof fetch;
   userAgent?: string;
+  /**
+   * TEST-ONLY seam: replaces (or adds) providers by name so tests can run without network.
+   * Not part of the supported public API; never set it in production.
+   */
+  providerOverrides?: Partial<Record<ProviderName, AuthProvider>>;
 }
