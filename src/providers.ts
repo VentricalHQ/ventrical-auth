@@ -1,3 +1,4 @@
+import { createPublicKey, verify, type JsonWebKey } from 'node:crypto';
 import * as oidc from 'openid-client';
 import type { AuthConfig, ProviderName, ProviderProfile } from './types.js';
 
@@ -83,6 +84,34 @@ export function cachedDiscovery(issuer: string, clientId: string, clientSecret: 
   };
 }
 
+/**
+ * openid-client 6 validates the ID token's claims (iss, aud, exp, nonce, ...) but does not check its signature,
+ * as OIDC Core 3.1.3.7 lets a client skip that for tokens received straight from the token endpoint. We verify it anyway
+ * against the issuer's published JWKS (RS256 only, which Google and Entra use; any other alg, including none, is rejected).
+ */
+async function verifyIdTokenSignature(idToken: string, jwksUri: string | undefined, fetchFn: typeof fetch): Promise<void> {
+  const fail = (): never => { throw new Error('id token signature verification failed'); };
+  const parts = idToken.split('.');
+  if (parts.length !== 3 || !jwksUri) return fail();
+  let header: { alg?: unknown; kid?: unknown };
+  try { header = JSON.parse(Buffer.from(parts[0]!, 'base64url').toString('utf8')) as typeof header; } catch { return fail(); }
+  if (header.alg !== 'RS256') return fail();
+  const res = await fetchFn(jwksUri);
+  if (!res.ok) return fail();
+  const { keys } = (await res.json()) as { keys?: Array<JsonWebKey & { kid?: string; use?: string }> };
+  const candidates = (Array.isArray(keys) ? keys : []).filter(
+    (k) => k.kty === 'RSA' && (k.use === undefined || k.use === 'sig') && (header.kid === undefined || k.kid === header.kid),
+  );
+  const sig = Buffer.from(parts[2]!, 'base64url');
+  const data = Buffer.from(`${parts[0]}.${parts[1]}`);
+  for (const jwk of candidates) {
+    try {
+      if (verify('RSA-SHA256', data, createPublicKey({ key: jwk, format: 'jwk' }), sig)) return;
+    } catch { /* try the next key */ }
+  }
+  return fail();
+}
+
 function oidcProvider(o: {
   name: 'google' | 'microsoft'; issuer: string; clientId: string; clientSecret: string; scopes: string[];
   redirectUri: string; toProfile: (c: Claims) => ProviderProfile; fetchFn: typeof fetch | undefined;
@@ -105,7 +134,8 @@ function oidcProvider(o: {
         pkceCodeVerifier: verifier, expectedState: ctx.state, expectedNonce: ctx.nonce, idTokenExpected: true,
       });
       const claims = tokens.claims();
-      if (!claims) throw new Error('no id token');
+      if (!claims || !tokens.id_token) throw new Error('no id token');
+      await verifyIdTokenSignature(tokens.id_token, (await config()).serverMetadata().jwks_uri, o.fetchFn ?? fetch);
       return o.toProfile(claims as unknown as Claims);
     },
   };
