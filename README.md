@@ -2,6 +2,8 @@
 
 OIDC sign-in for Ventrical services: Google, Microsoft and GitHub, with the security properties of the Kagaya backend's sign-in code it was extracted from. It has a framework-neutral core that speaks the Fetch API (`Request` and `Response`), thin adapters for Express, Next.js, Hono, Fastify and Postgres, and a storage interface so each app keeps its own database tables.
 
+> **Experimental (0.0.x): not yet recommended for production.** The API and the store contract may change between releases. Read [Security notes](#security-notes) before using it, and report vulnerabilities as described in [SECURITY.md](SECURITY.md).
+
 Status: version 0.1.0 is being prepared. **No git tag exists yet and nothing is published.** See [Release](#release).
 
 Requirements: Node 22 or newer, ESM only. `openid-client` is pinned to exactly 6.8.8.
@@ -82,9 +84,9 @@ app.get('/api/me', requireSession(auth), (req, res) => res.json({ id: req.user!.
 | `store` | An `AuthStore` (see below). |
 | `hooks` | Optional hooks, including `onError` (see [Hooks](#hooks)). |
 | `cookieNames` | `{ session?, oauth? }`, each overriding its default. Defaults: `__Host-ventrical_session` and `__Host-ventrical_oauth` when `publicUrl` is https and `cookieDomain` is unset (Secure, Path=/, no Domain); otherwise `ventrical_session` and `ventrical_oauth`. |
-| `cookieDomain` | Optional `Domain` attribute for both cookies. |
+| `cookieDomain` | Optional `Domain` attribute for both cookies. Setting it switches the default cookie names back to the plain ones. An explicit `cookieNames` value that starts with `__Host-` is always Secure with `Path=/` and no `Domain`, ignoring `cookieDomain`. |
 | `sessionTtlMs` | Session life, default 30 days. |
-| `onErrorTimeoutMs` | Longest wait for `hooks.onError` before responding anyway, default 2000. Positive, finite. |
+| `onErrorTimeoutMs` | Longest wait for `hooks.onError` before responding anyway, default 2000. Positive, finite, at most 2147483647 (the `setTimeout` maximum). |
 | `clock` | Optional `() => Date`, for tests. |
 | `fetch` | Optional `fetch` used for discovery, the token endpoint, the JWKS and GitHub's API. |
 | `userAgent` | `User-Agent` for GitHub's API, default `ventrical-auth`. |
@@ -238,6 +240,8 @@ Each app implements `AuthStore<Tx>` over its own database (or uses the Postgres 
 | `createSessionUnlessSuspended(userId, idHash, expiresAt, identity, tx)` | Holds the user row `FOR SHARE`; inserts the session and returns `true`, or returns `false` when the user is suspended. |
 | `getSessionWithExpiry(idHash, now)` | The session's user and expiry, excluding suspended users. |
 | `touchSession(idHash, expiresAt)`, `deleteSession(idHash)`, `deleteSessionsForUser(userId, tx?)` | As named; `deleteSessionsForUser` returns the number deleted. |
+| `purgeExpiredSessions(now)` | **Required.** Deletes every session with `expires_at <= now` and returns how many were removed. Custom `AuthStore` implementers must add it. |
+| `updateIdentity?(provider, subject, update, tx?)` | Optional. Updates the stored `email` and `emailVerified` of an existing identity (`email` undefined leaves it unchanged, null clears it; a no-op when the identity does not exist). The handler calls it inside the sign-in transaction on a returning sign-in, so the stored identity email stays current. Without it the stored email is not refreshed. |
 | `isSuspendedCredential?(idHash, now)` | Optional, read-only. Lets `requireSession` answer `account_suspended` instead of `unauthenticated`. |
 
 **`DuplicateIdentityError` contract.** The handler treats it as "the transaction is dead": it abandons the whole transaction and re-runs it once (so no savepoint is needed), finding the now-existing identity and continuing as a returning user. A store must therefore throw it only for a duplicate `(provider, subject)`, and a second failure ends in `sign_in_failed`. Because the transaction re-runs, `afterSignIn` may run twice (see Hooks).
@@ -290,9 +294,31 @@ for (const file of readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).
 
 - **Suspending a user:** set `users.suspended_at` and leave their session rows in place. If you delete the sessions, a suspended person's old cookie no longer matches anything and the `403 account_suspended` answer degrades to `401 unauthenticated`.
 - **Non-browser clients:** the logout POSTs require an `Origin` or `Referer` header from a trusted origin (see above). Scripts and mobile clients must send one.
-- **Expired sessions are not purged by the package.** Expired rows are ignored but stay in the table, so delete them periodically, for example `delete from sessions where expires_at < now()` on a schedule.
+- **Expired sessions are not purged automatically.** Expired rows are ignored but stay in the table; see [Security notes](#security-notes) for `store.purgeExpiredSessions`.
 
 Keep your own data in your own tables keyed by user id, not as extra columns on `users`.
+
+## Security notes
+
+- **Rate limiting:** the package does not rate-limit anything. Rate-limit `/auth/*` in your application (a reverse proxy or middleware in front of the auth routes).
+- **Purge expired sessions on a schedule.** `store.purgeExpiredSessions(now: Date): Promise<number>` deletes every session with `expires_at <= now` and returns how many rows were removed. `pgAuthStore` supports it, and it is a required method of `AuthStore`, so custom stores must implement it. Example:
+
+  ```ts
+  setInterval(() => {
+    store.purgeExpiredSessions(new Date()).then(
+      (n) => console.log(`purged ${n} expired sessions`),
+      () => { /* log and try again next time */ },
+    );
+  }, 60 * 60 * 1000);
+  ```
+
+  A cron job or a scheduled task that calls the same method works equally well.
+- **Keep `hooks.onError` fast.** It is awaited before the response is returned, bounded by `onErrorTimeoutMs` (default 2000 ms, at most 2147483647). Hand slow work off instead of blocking on it.
+- **Same-site deployment only.** The frontend and the API must share a registrable domain (use `cookieDomain` to share the cookie with sibling subdomains). The `Origin`/`Referer` check on POST routes trusts `frontendUrl` and `publicUrl`. See [Same-site deployment only](#same-site-deployment-only) and [POST routes and the Origin check](#post-routes-and-the-origin-check).
+- **ID-token signature check:** RS256 only, JWKS cached for 5 minutes, one refetch on an unknown `kid` (concurrent lookups share a single in-flight fetch), and it fails closed. Details in [ID-token signature check](#id-token-signature-check).
+- **`__Host-` cookies:** when `publicUrl` is https and `cookieDomain` is unset, the cookies are named `__Host-ventrical_session` and `__Host-ventrical_oauth` (Secure, `Path=/`, no `Domain`). To use other names, set `cookieNames`. An explicit `cookieNames` value starting with `__Host-` is always Secure with `Path=/` and no `Domain`, ignoring `cookieDomain`. **One-time sign-out:** an https deployment that upgrades to this default stops recognising its old plain-named session cookies, so everyone is signed out once. To avoid that, pin `cookieNames` to the old names (`ventrical_session`, `ventrical_oauth`).
+- **Stored identity email:** on a returning sign-in the handler refreshes the identity's stored email and verified flag through the optional `store.updateIdentity` (see [The `AuthStore` contract](#the-authstore-contract)); custom stores should implement it.
+- **Reporting vulnerabilities:** see [SECURITY.md](SECURITY.md).
 
 ## Development
 
