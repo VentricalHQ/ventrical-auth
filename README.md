@@ -1,6 +1,6 @@
 # @ventrical/auth
 
-OIDC sign-in for Ventrical services: Google, Microsoft and GitHub, with the security properties of the Kagaya backend's sign-in code it was extracted from. It has a framework-neutral core that speaks the Fetch API (`Request` and `Response`), thin adapters for Express and Postgres, and a storage interface so each app keeps its own database tables.
+OIDC sign-in for Ventrical services: Google, Microsoft and GitHub, with the security properties of the Kagaya backend's sign-in code it was extracted from. It has a framework-neutral core that speaks the Fetch API (`Request` and `Response`), thin adapters for Express, Next.js, Hono, Fastify and Postgres, and a storage interface so each app keeps its own database tables.
 
 Status: version 0.1.0 is being prepared. **No git tag exists yet and nothing is published.** See [Release](#release).
 
@@ -25,7 +25,7 @@ Requirements: Node 22 or newer, ESM only. `openid-client` is pinned to exactly 6
 "@ventrical/auth": "github:VentricalHQ/ventrical-auth#v0.1.0"
 ```
 
-The package builds itself on install (`prepare` runs `npm run build`). Consumers need access to the private repository. TypeScript consumers of the Express adapter also need `@types/express` (the adapter exports Express types), and consumers of `@ventrical/auth/pg` need `@types/pg` (the store's signature uses `pg` types). Express 5 itself is an optional peer dependency needed only for `@ventrical/auth/express`. `pg` is a regular dependency.
+The package builds itself on install (`prepare` runs `npm run build`). Consumers need access to the private repository. TypeScript consumers of the Express adapter also need `@types/express` (the adapter exports Express types), and consumers of `@ventrical/auth/pg` need `@types/pg` (the store's signature uses `pg` types). Express 5, Next (>=14), Hono 4 and Fastify 5 are optional peer dependencies, needed only for the matching entry point; install just the one you use. The Next adapter uses plain `Request` and `Response` and never imports `next` (not even as a type); the Hono and Fastify adapters import their framework as types only. `pg` is a regular dependency.
 
 Entry points:
 
@@ -33,6 +33,9 @@ Entry points:
 | --- | --- |
 | `@ventrical/auth` | `createAuth`, the types, `AuthHttpError`, `DuplicateIdentityError`, `SUSPENDED_MESSAGE` |
 | `@ventrical/auth/express` | `authRouter`, `requireSession`, `currentSession`, `req.user` typing |
+| `@ventrical/auth/next` | `authRouteHandlers`, `getSessionFromRequest`, `requireSession` |
+| `@ventrical/auth/hono` | `authHandler`, `requireSession`, `AuthVariables` type |
+| `@ventrical/auth/fastify` | `authPlugin`, `requireSession`, `request.user` typing |
 | `@ventrical/auth/pg` | `pgAuthStore`, `migrationsDir` |
 
 ## Quick start (Express and Postgres)
@@ -77,7 +80,7 @@ app.get('/api/me', requireSession(auth), (req, res) => res.json({ id: req.user!.
 | `frontendUrl` | Where people are sent after sign-in; also a trusted origin for POST routes. |
 | `encryptionKey` | A 32-byte `Buffer`, used to encrypt the OAuth state cookie. |
 | `store` | An `AuthStore` (see below). |
-| `hooks` | Optional hooks (see below). |
+| `hooks` | Optional hooks, including `onError` (see [Hooks](#hooks)). |
 | `cookieNames` | `{ session?, oauth? }`, defaults `ventrical_session` and `ventrical_oauth`. |
 | `cookieDomain` | Optional `Domain` attribute for both cookies. |
 | `sessionTtlMs` | Session life, default 30 days. |
@@ -114,6 +117,58 @@ The core never touches Express's `req` or `res`. Cookies are read from the `Cook
 - `requireSession(auth)`: middleware that sets `req.user`, appends a refreshed session cookie when needed, and passes an `AuthHttpError` to `next()` on failure (`401`, or `403` for a suspended account; the same non-path targets get `401`). Map it to a response in your error handler.
 - `currentSession(auth)`: returns `async (req, res?) => SessionResult | undefined` for routes that serve signed-in and anonymous callers alike. It sets `req.user` when there is a session, appends a refreshed cookie to `res` when one is passed, and resolves `undefined` (never rejects) for an anonymous caller. Only unexpected store failures reject.
 
+### Next.js, Hono and Fastify adapters
+
+Each is a thin layer over `handle` and `requireSession`. All of them build the request URL from `publicUrl`, never from the `Host` header, never forward a body (no auth route reads one), and answer unexpected errors with a fixed message. Auth failures use the same JSON shape as the core, `{ "error": { "code", "message" } }`: `401 unauthenticated`, or `403 account_suspended` when the cookie belongs to a suspended user. Mount the auth routes at the root, as with Express.
+
+**Next.js** (`@ventrical/auth/next`, App Router). `next` is an optional peer and is not a runtime dependency. Exports `authRouteHandlers(auth)` (`{ GET, POST }` for a catch-all route; paths the core does not serve answer `404`), `getSessionFromRequest(auth)` (resolves the session or `undefined`) and `requireSession(auth)` (resolves the session, or a ready `401`/`403` `Response` to return). When `setCookie` is present on a session, append it to your response as `Set-Cookie`.
+
+```ts
+// app/auth/[...auth]/route.ts
+import { authRouteHandlers } from '@ventrical/auth/next';
+import { auth } from '@/lib/auth'; // your createAuth(...) result
+
+export const { GET, POST } = authRouteHandlers(auth);
+```
+
+```ts
+// app/api/me/route.ts
+import { requireSession } from '@ventrical/auth/next';
+import { auth } from '@/lib/auth';
+
+const need = requireSession(auth);
+
+export async function GET(req: Request) {
+  const session = await need(req);
+  if (session instanceof Response) return session;
+  const res = Response.json({ id: session.user.id });
+  if (session.setCookie) res.headers.append('set-cookie', session.setCookie);
+  return res;
+}
+```
+
+**Hono** (`@ventrical/auth/hono`, Hono 4). `authHandler(auth)` is a middleware serving every auth route and passing other paths on; `requireSession(auth)` sets `c.get('user')` (typed by `AuthVariables`), forwards a refreshed session cookie, and answers `401`/`403` JSON.
+
+```ts
+import { Hono } from 'hono';
+import { authHandler, requireSession, type AuthVariables } from '@ventrical/auth/hono';
+
+const app = new Hono<{ Variables: AuthVariables }>();
+app.use(authHandler(auth));
+app.get('/api/me', requireSession(auth), (c) => c.json({ id: c.get('user').id }));
+```
+
+**Fastify** (`@ventrical/auth/fastify`, Fastify 5). `authPlugin(auth)` serves the auth routes from an `onRequest` hook and is not encapsulated, so it covers the whole app; register it once, at the root. `requireSession(auth)` is a `preHandler` that sets `request.user` (typed) and sets a refreshed cookie on the reply.
+
+```ts
+import Fastify from 'fastify';
+import { authPlugin, requireSession } from '@ventrical/auth/fastify';
+
+const app = Fastify();
+await app.register(authPlugin(auth));
+app.get('/api/me', { preHandler: requireSession(auth) }, async (req) => ({ id: req.user!.id }));
+```
+
 ## POST routes and the Origin check
 
 Log out and log out everywhere are state-changing POSTs, protected by `isSameOrigin`: the request must carry an `Origin` header, or else a `Referer`, whose origin equals the origin of `frontendUrl` **or** of `publicUrl`. Both are trusted because backend-served pages (such as an app's own authorize page) post from the public URL. A request with neither header, or with any other origin, is rejected with `403 forbidden` and nothing is changed.
@@ -128,7 +183,7 @@ The frontend and the API must share a registrable domain: sessions use `sameSite
 
 - RS256 only: `alg: none`, HMAC and other algorithms are rejected. The token header must carry a `kid`.
 - The matching JWK must be an RSA signing key (`use` is `sig` or absent, `alg` is `RS256` or absent) of at least 2048 bits.
-- The JWKS is cached for 5 minutes per URI. An unknown `kid` triggers exactly one refetch, then fails.
+- The JWKS is cached for 5 minutes per URI. An unknown `kid` triggers exactly one refetch, then fails. Concurrent lookups for the same URI share a single in-flight fetch (single-flight), so a burst of tokens with an unknown `kid` causes one request to the provider, and a failed fetch is not cached.
 - Fails closed: a JWKS fetch error, a non-OK or non-JSON response, a malformed key set or a bad signature all end the sign-in with a generic error. The error never includes the token, key material or response bodies.
 
 The upstream implementation relied on TLS to the token endpoint; this package additionally verifies the signature. Anyone migrating from the upstream code should be aware of the difference.
@@ -136,6 +191,30 @@ The upstream implementation relied on TLS to the token endpoint; this package ad
 ## Hooks
 
 All hooks are optional. `Tx` is the transaction handle type of your store.
+
+- `onError(event)` observes failures so they leave a trace in your own logs or metrics. It receives `{ stage, code, provider?, errorName? }`:
+  - `stage`: `start`, `callback`, `link` (the callback when it completes an account link), `logout` (both logout routes), or `request` (a failure before the route is recognised, such as a malformed request URL).
+  - `code`: see the table below. `provider` is set when the provider name is known. `errorName` is the error's class name, when an error was involved.
+  - The event is built from a fixed whitelist. It **never carries** a message, stack, token, authorization code, JWKS, key material, response body, email or any other profile data, only the class name.
+  - A throwing or rejecting `onError` is swallowed and never changes the response. The hook is awaited before the response is returned, so keep it fast: hand slow work (network calls, queues) off instead of blocking on it.
+  - Success paths report nothing, and so do unknown routes and providers (`not_found`), to keep probing out of your logs. Calling `getSession` or `requireSession` directly is not reported; the caller handles those errors.
+
+  | Stage | Codes |
+  | --- | --- |
+  | `start` | `provider_disabled`, `internal_error` |
+  | `callback` | `invalid_state`, `oauth_error`, `provider_disabled`, `exchange_failed` (code exchange or ID-token and signature verification threw; the response is still `400 oauth_error`), `suspended`, `sign_in_failed`, the `canCreateAccount` deny reason, `internal_error` |
+  | `link` | `identity_in_use`, `link_failed`, `internal_error` |
+  | `logout` | `forbidden`, `unauthenticated`, `account_suspended`, `internal_error` |
+
+  A `canCreateAccount` reason is also placed in the redirect URL (`?error=`), so it must be a short code and must not contain PII.
+
+  ```ts
+  hooks: {
+    onError: ({ stage, code, provider, errorName }) => {
+      logger.warn({ stage, code, provider, errorName }, 'auth failure'); // your logger; keep it fast
+    },
+  },
+  ```
 
 - `canCreateAccount(profile)` returns `{ allow: true }` or `{ allow: false, reason }`. It runs only when no identity matches and the flow is not a link flow, before any write, and never for returning users or linking. It sees the full profile including `emailVerified` and `provider`. A denied sign-in redirects to `<frontendUrl>/signin?error=<reason>`. Use it for invite-only apps.
 - `afterSignIn({ user, profile, provider, isNew, tx })` runs inside the sign-in transaction, before the session row is written and before any cookie is set, for new and returning users (`isNew: false`). If it throws, everything rolls back (no user, no session) and the person is redirected to `<frontendUrl>/signin?error=sign_in_failed`. **It may run twice** when two sign-ins race to create the same identity: the loser's transaction is abandoned and the whole transaction re-runs once as a returning user. Keep it transaction-only: do all its writes through `tx` and trigger no external side effects.
@@ -249,6 +328,6 @@ git tag v0.1.0
 
 ## Not in v0.1
 
-There is no logging and no `onError` hook, by design: the package never writes provider or store errors anywhere, so a `?error=sign_in_failed` redirect leaves no trace. An app that needs diagnosis should wrap its own store and hooks and log there. An optional error hook is planned.
+The package does no logging of its own; use the `onError` hook to observe failures.
 
-Firms, roles and invites (they live in the apps), Drive and OneDrive consent, admin roles, connector linking, OAuth token revocation, passwords, email magic links, MFA and SAML. Next.js, Hono and Fastify adapters are not built; each should be a few dozen lines over `handle`.
+Firms, roles and invites (they live in the apps), Drive and OneDrive consent, admin roles, connector linking, OAuth token revocation, passwords, email magic links, MFA and SAML.
