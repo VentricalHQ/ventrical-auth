@@ -96,4 +96,28 @@ describe('hono adapter', () => {
     expect(res.status).toBe(500);
     expect(await res.text()).not.toContain('secret-detail');
   });
+
+  const oddRequest = () => {
+    const r = new Request('https://x.example.test/auth/providers');
+    Object.defineProperty(r, 'url', { value: 'not a url' });
+    return r;
+  };
+
+  it('a malformed request URL falls through authHandler and is answered 401 by requireSession', async () => {
+    const { auth } = setup();
+    let calls = 0;
+    const app = new Hono<{ Variables: AuthVariables }>();
+    app.use(authHandler({ ...auth, handle: async (q) => { calls++; return auth.handle(q); } }));
+    app.all('*', requireSession(auth), (c) => c.text('app'));
+    app.notFound((c) => c.text('fell-through', 418));
+    const res = await app.fetch(oddRequest());
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: { code: 'unauthenticated', message: 'Sign in required' } });
+    expect(calls).toBe(0);
+
+    const plain = new Hono();
+    plain.use(authHandler(auth));
+    plain.notFound((c) => c.text('fell-through', 418));
+    expect((await plain.fetch(oddRequest())).status).toBe(418);
+  });
 });

@@ -88,4 +88,23 @@ describe('next adapter', () => {
     expect(sus.status).toBe(403);
     expect(await sus.json()).toEqual({ error: { code: 'account_suspended', message: SUSPENDED_MESSAGE } });
   });
+
+  it('a malformed request URL gets 404 from the handlers and 401 from requireSession without calling the core', async () => {
+    const { auth } = setup();
+    let calls = 0;
+    const counting = { ...auth, handle: async (q: Request) => { calls++; return auth.handle(q); } };
+    const odd = () => {
+      const q = new Request('https://x.example.test/auth/providers');
+      Object.defineProperty(q, 'url', { value: 'not a url' });
+      return q;
+    };
+    const { GET, POST } = authRouteHandlers(counting);
+    expect((await GET(odd())).status).toBe(404);
+    expect((await POST(odd())).status).toBe(404);
+    expect(calls).toBe(0);
+    const out = await requireSession(auth)(odd()) as Response;
+    expect(out.status).toBe(401);
+    expect(await out.json()).toEqual({ error: { code: 'unauthenticated', message: 'Sign in required' } });
+    expect(await getSessionFromRequest(auth)(odd())).toBeUndefined();
+  });
 });

@@ -55,26 +55,73 @@ describe('fastify adapter', () => {
     expect(seen).toEqual([`${PUBLIC}/auth/providers?x=1`]);
   });
 
-  it('absolute-form request targets are never handed to the auth core', async () => {
-    const { auth } = setup();
-    const seen: string[] = [];
-    const app = build();
-    await app.register(authPlugin({ ...auth, handle: async (q) => { seen.push(q.url); return auth.handle(q); } }));
-    app.setNotFoundHandler(async (_req, reply) => reply.code(418).send());
+  const rawRequest = (port: number, target: string, method: string, extra = '', body = '') => new Promise<string>((resolve, reject) => {
+    const sock = net.connect(port, '127.0.0.1', () => sock.write(`${method} ${target} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n${extra}\r\n${body}`));
+    let out = '';
+    sock.on('data', (d) => { out += d.toString(); });
+    sock.on('end', () => resolve(out));
+    sock.on('error', reject);
+  });
+  const listen = async (app: ReturnType<typeof Fastify>) => {
     await app.listen({ port: 0, host: '127.0.0.1' });
-    const port = (app.server.address() as AddressInfo).port;
-    const raw = (target: string, method: string) => new Promise<string>((resolve, reject) => {
-      const sock = net.connect(port, '127.0.0.1', () => sock.write(`${method} ${target} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n`));
-      let out = '';
-      sock.on('data', (d) => { out += d.toString(); });
-      sock.on('end', () => resolve(out));
-      sock.on('error', reject);
-    });
-    await raw('http://evil.example.test/auth/providers', 'GET');
-    await raw('*', 'OPTIONS');
-    expect(seen).toEqual([]);
-    expect(await raw('/auth/providers', 'GET')).toMatch(/^HTTP\/1.1 200/);
-    expect(seen).toEqual([`${PUBLIC}/auth/providers`]);
+    return (app.server.address() as AddressInfo).port;
+  };
+
+  it('absolute-form and asterisk request targets never reach the auth core and never answer 500', async () => {
+    const { auth } = setup();
+    let calls = 0;
+    const app = build();
+    await app.register(authPlugin({ ...auth, handle: async (q) => { calls++; return auth.handle(q); } }));
+    app.setNotFoundHandler(async (_req, reply) => reply.code(418).send());
+    const port = await listen(app);
+    const abs = await rawRequest(port, 'http://evil.example.test/auth/providers', 'GET');
+    const star = await rawRequest(port, '*', 'OPTIONS');
+    expect(abs).not.toMatch(/^HTTP\/1.1 500/);
+    expect(star).not.toMatch(/^HTTP\/1.1 500/);
+    expect(abs).toMatch(/^HTTP\/1.1 (418|404|400)/);
+    expect(star).toMatch(/^HTTP\/1.1 (418|404|400)/);
+    expect(calls).toBe(0);
+    expect(await rawRequest(port, '/auth/providers', 'GET')).toMatch(/^HTTP\/1.1 200/);
+    expect(calls).toBe(1);
+  });
+
+  it('requireSession answers 401 and skips the handler for absolute-form and asterisk targets', async () => {
+    const { auth } = setup();
+    let ran = 0;
+    const app = build();
+    app.route({ method: ['GET', 'OPTIONS'], url: '/*', preHandler: requireSession(auth), handler: async () => { ran++; return 'ok'; } });
+    const port = await listen(app);
+    const abs = await rawRequest(port, 'http://evil.example.test/me', 'GET');
+    const star = await rawRequest(port, '*', 'OPTIONS');
+    expect(abs).not.toMatch(/^HTTP\/1.1 200/);
+    expect(star).not.toMatch(/^HTTP\/1.1 200/);
+    expect(abs).not.toMatch(/^HTTP\/1.1 500/);
+    expect(ran).toBe(0);
+    let coreCalls = 0;
+    const direct = requireSession({ ...auth, requireSession: async (q) => { coreCalls++; return auth.requireSession(q); } });
+    const reply = { code: (c: number) => ({ send: (b: unknown) => ({ c, b }) }), header: () => undefined };
+    const out = await (direct as any)({ raw: { url: 'http://evil.example.test/me' }, headers: {}, method: 'GET' }, reply);
+    expect(out).toEqual({ c: 401, b: { error: { code: 'unauthenticated', message: 'Sign in required' } } });
+    expect(coreCalls).toBe(0);
+  });
+
+  it('logout with a JSON body or an odd content-type still reaches the core (403 without origin, 204 with)', async () => {
+    const { auth, store } = setup();
+    const app = build();
+    await app.register(authPlugin(auth));
+    const port = await listen(app);
+    const { sid } = await seedSession(store, new Date(Date.now() + 864e5));
+    const cookie = `Cookie: ventrical_session=${sid.id}\r\n`;
+    for (const ct of ['application/json', 'application/x-weird']) {
+      const body = '{"a":1}';
+      const head = `${cookie}Content-Type: ${ct}\r\nContent-Length: ${body.length}\r\n`;
+      expect(await rawRequest(port, '/auth/logout', 'POST', head, body)).toMatch(/^HTTP\/1.1 403/);
+    }
+    expect(store.sessions.size).toBe(1);
+    const body = '{"a":1}';
+    const ok = await rawRequest(port, '/auth/logout', 'POST', `${cookie}Origin: ${FRONT}\r\nContent-Type: application/x-weird\r\nContent-Length: ${body.length}\r\n`, body);
+    expect(ok).toMatch(/^HTTP\/1.1 204/);
+    expect(store.sessions.size).toBe(0);
   });
 
   it('preserves multiple Set-Cookie headers', async () => {
