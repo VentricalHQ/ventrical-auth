@@ -13,7 +13,7 @@ Requirements: Node 22 or newer, ESM only. `openid-client` is pinned to exactly 6
 - Authorization-code flow with PKCE (S256), `state` and `nonce` for Google and Microsoft. GitHub has no PKCE or ID token; its `state` is checked.
 - Verifies the ID token's `iss` (including Entra's `{tenantid}` template), `aud`, `exp` and `nonce`, requires the callback's own `iss` parameter (RFC 9207) when the provider advertises it, and verifies the token's signature (see [ID-token signature check](#id-token-signature-check)).
 - Email counts as verified only when the provider proves it: Google's `email_verified`; Microsoft only when `xms_edov` is true on the `email` claim (`preferred_username` is never verified); GitHub only for the primary verified email.
-- The OAuth state cookie is encrypted (AES-256-GCM), lives 10 minutes, and is cleared on every callback outcome.
+- The OAuth state cookie is encrypted (AES-256-GCM, bound to its purpose), lives 10 minutes, and is cleared on every callback outcome.
 - Accounts are never linked by email. Linking happens only inside the session that started the flow (bound at `/start`).
 - A suspended person cannot return through another provider with the same verified email.
 - The suspended check and the session insert share one transaction, with the user row held `FOR SHARE`.

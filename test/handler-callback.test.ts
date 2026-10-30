@@ -28,6 +28,7 @@ function setup(profiles: Partial<Record<ProviderName, ProviderProfile | Error>>,
   return { store, auth };
 }
 
+const STATE_AAD = 'ventrical-auth/oauth-state';
 type Auth = ReturnType<typeof setup>['auth'];
 
 /** Runs /start then the callback; `session` is a session cookie header sent to both. */
@@ -457,6 +458,34 @@ describe('GET /auth/:provider/callback', () => {
     expect(loc(res)).toBe(`${FRONT}/signin?error=sign_in_failed`);
   });
 
+  describe('state cookie purpose and /start redirect length', () => {
+    const redirectSaved = async (redirect: string) => {
+      const { auth } = setup({ google: prof('g1') });
+      const start = (await auth.handle(req('GET', `/auth/google/start?redirect=${encodeURIComponent(redirect)}`)))!;
+      const c = setCookie(start, '__Host-ventrical_oauth')!;
+      return { saved: JSON.parse(decrypt(c.value, KEY, STATE_AAD)).redirect as string, cookieLen: c.value.length };
+    };
+    it('a state sealed for another purpose is rejected at the callback', async () => {
+      const { auth } = setup({ google: prof('g1') });
+      const start = (await auth.handle(req('GET', '/auth/google/start')))!;
+      const plain = decrypt(setCookie(start, '__Host-ventrical_oauth')!.value, KEY, STATE_AAD);
+      const foreign = encrypt(plain, KEY, 'some-other-purpose');
+      const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
+      const res = (await auth.handle(req('GET', `/auth/google/callback?code=c&state=${encodeURIComponent(state)}`, { cookie: `__Host-ventrical_oauth=${encodeURIComponent(foreign)}` })))!;
+      expect(res.status).toBe(400);
+      expect(sessionCookieOf(res)).toBeUndefined();
+    });
+    it('a 513-character redirect falls back to /', async () => {
+      expect((await redirectSaved('/' + 'a'.repeat(512))).saved).toBe('/');
+    });
+    it('a 512-character redirect is kept, and the cookie stays small', async () => {
+      const r = '/' + 'a'.repeat(511);
+      const { saved, cookieLen } = await redirectSaved(r);
+      expect(saved).toBe(r);
+      expect(cookieLen).toBeLessThan(2000);
+    });
+  });
+
   describe('state cookie age (injected clock)', () => {
     const T0 = 1_800_000_000_000;
     const MAX = 10 * 60 * 1000;
@@ -466,7 +495,7 @@ describe('GET /auth/:provider/callback', () => {
       const { auth } = setup({ google: prof('g1') }, { clock: () => new Date(now) });
       const start = (await auth.handle(req('GET', '/auth/google/start')))!;
       let value = setCookie(start, '__Host-ventrical_oauth')!.value;
-      if (mutate) value = encrypt(JSON.stringify(mutate(JSON.parse(decrypt(value, KEY)))), KEY);
+      if (mutate) value = encrypt(JSON.stringify(mutate(JSON.parse(decrypt(value, KEY, STATE_AAD)))), KEY, STATE_AAD);
       const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
       now = T0 + delta;
       const res = (await auth.handle(req('GET', `/auth/google/callback?code=c&state=${encodeURIComponent(state)}`, { cookie: `__Host-ventrical_oauth=${encodeURIComponent(value)}` })))!;
@@ -477,11 +506,13 @@ describe('GET /auth/:provider/callback', () => {
     it('start seals iat from the injected clock', async () => {
       const { auth } = setup({ google: prof('g1') }, { clock: () => new Date(T0) });
       const start = (await auth.handle(req('GET', '/auth/google/start')))!;
-      expect(JSON.parse(decrypt(setCookie(start, '__Host-ventrical_oauth')!.value, KEY)).iat).toBe(T0);
+      expect(JSON.parse(decrypt(setCookie(start, '__Host-ventrical_oauth')!.value, KEY, STATE_AAD)).iat).toBe(T0);
     });
     it('a fresh state is accepted', async () => {
-      expect((await atAge(1000)).status).toBe(302);
-      expect(loc(await atAge(1000))).toContain('/');
+      const res = await atAge(1000);
+      expect(res.status).toBe(302);
+      expect(loc(res)).toBe(`${FRONT}/`);
+      expect(sessionCookieOf(res)).toBeDefined();
     });
     it('exactly 10 minutes old is accepted (only strictly older than 10 minutes is rejected)', async () => {
       const res = await atAge(MAX);

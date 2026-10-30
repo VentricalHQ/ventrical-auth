@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 
-const VERSION = 'v1';
+const VERSION = 'v2';
 const ALGORITHM = 'aes-256-gcm';
 const KEY_BYTES = 32;
 const IV_BYTES = 12;
@@ -19,18 +19,22 @@ function assertKey(key: Buffer): void {
   }
 }
 
-/** Encrypts with AES-256-GCM. Output: `v1:<iv b64>:<tag b64>:<data b64>`. */
-export function encrypt(plain: string, key: Buffer): string {
+/**
+ * Encrypts with AES-256-GCM. Output: `v2:<iv b64>:<tag b64>:<data b64>`.
+ * `aad` is authenticated but not stored: a blob only opens with the same value (domain separation).
+ */
+export function encrypt(plain: string, key: Buffer, aad = ''): string {
   assertKey(key);
   const iv = randomBytes(IV_BYTES);
   const cipher = createCipheriv(ALGORITHM, key, iv, { authTagLength: TAG_BYTES });
+  cipher.setAAD(Buffer.from(aad, 'utf8'));
   const data = Buffer.concat([cipher.update(plain, 'utf8'), cipher.final()]);
   const tag = cipher.getAuthTag();
   return [VERSION, iv.toString('base64'), tag.toString('base64'), data.toString('base64')].join(':');
 }
 
 /** Decrypts a blob produced by `encrypt`. Throws SecretError on any failure. */
-export function decrypt(blob: string, key: Buffer): string {
+export function decrypt(blob: string, key: Buffer, aad = ''): string {
   assertKey(key);
   const parts = blob.split(':');
   if (parts.length !== 4) {
@@ -51,6 +55,7 @@ export function decrypt(blob: string, key: Buffer): string {
   const data = Buffer.from(dataB64, 'base64');
   try {
     const decipher = createDecipheriv(ALGORITHM, key, iv, { authTagLength: TAG_BYTES });
+    decipher.setAAD(Buffer.from(aad, 'utf8'));
     decipher.setAuthTag(tag);
     return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
   } catch {

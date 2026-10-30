@@ -45,6 +45,8 @@ function safeDecode(v: string): string {
   }
 }
 
+const MAX_START_REDIRECT = 512;
+
 /** Thrown inside the sign-in transaction to roll everything back and redirect to ?error=suspended. */
 class SuspendedSignal extends Error {}
 
@@ -130,6 +132,9 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
     }
   };
 
+  /** The /start redirect is capped so the state cookie stays small; hook paths are not capped here. */
+  const startRedirect = (v: string | null): string => (v !== null && v.length > MAX_START_REDIRECT ? '/' : safeRedirect(v));
+
   async function start(request: Request, url: URL, name: string): Promise<Response> {
     const provider = lookupProvider(name);
     const session = await sessions.getSession(request);
@@ -139,7 +144,7 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
     const authUrl = await provider.authorizeUrl(state, codeVerifier, nonce);
     const sealed = sealOAuthState({
       provider: provider.name, state, codeVerifier, nonce,
-      redirect: safeRedirect(url.searchParams.get('redirect')),
+      redirect: startRedirect(url.searchParams.get('redirect')),
       iat: clock().getTime(),
       ...(session ? { linkUserId: session.user.id } : {}),
     }, config.encryptionKey);

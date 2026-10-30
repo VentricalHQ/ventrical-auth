@@ -54,15 +54,18 @@ export interface OAuthState {
   iat: number;
 }
 
+/** Domain-separation value bound into the state cookie's encryption. */
+export const OAUTH_STATE_AAD = 'ventrical-auth/oauth-state';
+
 export function sealOAuthState(s: OAuthState, key: Buffer): string {
-  return encrypt(JSON.stringify(s), key);
+  return encrypt(JSON.stringify(s), key, OAUTH_STATE_AAD);
 }
 
 /** Returns undefined when the value is missing, tampered with, or malformed. */
 export function openOAuthState(raw: string | undefined, key: Buffer): OAuthState | undefined {
   if (!raw) return undefined;
   try {
-    const v = JSON.parse(decrypt(raw, key)) as Partial<OAuthState> | null;
+    const v = JSON.parse(decrypt(raw, key, OAUTH_STATE_AAD)) as Partial<OAuthState> | null;
     if (!v || typeof v !== 'object') return undefined;
     if (typeof v.provider !== 'string' || typeof v.state !== 'string' || typeof v.codeVerifier !== 'string' || typeof v.redirect !== 'string') return undefined;
     if (typeof v.iat !== 'number' || !Number.isFinite(v.iat)) return undefined;
