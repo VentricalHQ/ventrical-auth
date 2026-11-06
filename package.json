@@ -63,7 +63,7 @@
     }
   },
   "dependencies": {
-    "openid-client": "6.8.8",
+    "openid-client": "6.8.9",
     "pg": "^8.23.1",
     "ulid": "^3.0.2"
   },
