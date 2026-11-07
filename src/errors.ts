@@ -6,6 +6,8 @@ export class AuthHttpError extends Error {
     public readonly status: number,
     public readonly code: string,
     message: string,
+    /** Set-Cookie values to send with the error response (e.g. clearing a session that was just deleted). */
+    public readonly cookies: readonly string[] = [],
   ) {
     super(message);
     this.name = 'AuthHttpError';

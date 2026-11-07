@@ -16,6 +16,38 @@ function isHttpUrl(v: unknown): boolean {
 
 const nonEmpty = (v: unknown): boolean => typeof v === 'string' && v !== '';
 
+/** Store methods the second factor cannot work (or fail closed) without. */
+const TWO_FACTOR_STORE_METHODS = [
+  'getTotp', 'setPendingTotpSecret', 'confirmTotp', 'deleteTotp', 'consumeTotpStep', 'recordTotpFailure', 'resetTotpFailures',
+  'consumeRecoveryCode', 'replaceRecoveryCodes', 'markSessionVerified', 'markSessionPending', 'incrementSessionMfaAttempts', 'deleteOtherSessions',
+] as const;
+
+function validateTwoFactor(config: AuthConfig<any>): void {
+  const tf: unknown = config.twoFactor;
+  if (tf === undefined) return;
+  if (typeof tf !== 'object' || tf === null || Array.isArray(tf)) throw new Error('Invalid auth config: twoFactor must be an object');
+  const c = tf as Record<string, unknown>;
+  if (typeof c.issuer !== 'string' || c.issuer.trim() === '') throw new Error('Invalid auth config: twoFactor.issuer must be a non-empty string');
+  if (c.required !== undefined && typeof c.required !== 'boolean' && typeof c.required !== 'function') {
+    throw new Error('Invalid auth config: twoFactor.required must be a boolean or a function');
+  }
+  if (c.verifyPath !== undefined && !(typeof c.verifyPath === 'string' && /^\/(?![/\\])/.test(c.verifyPath))) {
+    throw new Error('Invalid auth config: twoFactor.verifyPath must be a path starting with a single "/"');
+  }
+  for (const key of ['pendingTtlMs', 'maxAttempts', 'lockoutMs', 'recoveryCodeCount'] as const) {
+    const v = c[key];
+    if (v === undefined) continue;
+    if (!(typeof v === 'number' && Number.isFinite(v) && v > 0)) throw new Error(`Invalid auth config: twoFactor.${key} must be a positive finite number`);
+    if ((key === 'maxAttempts' || key === 'recoveryCodeCount') && !Number.isInteger(v)) {
+      throw new Error(`Invalid auth config: twoFactor.${key} must be a whole number`);
+    }
+  }
+  const store = config.store as unknown as Record<string, unknown>;
+  for (const m of TWO_FACTOR_STORE_METHODS) {
+    if (typeof store[m] !== 'function') throw new Error(`Invalid auth config: twoFactor needs store.${m}, which this store does not implement`);
+  }
+}
+
 /** Validates config. Error messages name the bad field, never its value. */
 function validateConfig(config: AuthConfig<any>): void {
   if (!Buffer.isBuffer(config.encryptionKey) || config.encryptionKey.length !== 32) {
@@ -52,10 +84,11 @@ function validateConfig(config: AuthConfig<any>): void {
   if (maxAge !== undefined && !(typeof maxAge === 'number' && Number.isFinite(maxAge) && maxAge > 0)) {
     throw new Error('Invalid auth config: sessionMaxAgeMs must be a positive finite number');
   }
+  validateTwoFactor(config);
 }
 
 export type { Auth } from './handler.js';
-export type { SessionResult, SessionUser } from './session.js';
+export type { PendingSession, SessionResult, SessionUser } from './session.js';
 
 /** Validates config and returns the framework-neutral core: `handle`, `getSession`, `requireSession`. */
 export function createAuth<Tx = unknown>(config: AuthConfig<Tx>): Auth {

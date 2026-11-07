@@ -1,10 +1,11 @@
 // Plain Request/Response only: next is an optional peer and is never imported, even as a type.
-import type { Auth } from '../index.js';
+import type { Auth, PendingSession } from '../index.js';
+import { needsBody, readRequestText } from '../body.js';
 import { AuthHttpError } from '../errors.js';
 import type { SessionResult } from '../session.js';
 
 /** Rebuilds the request on the configured public origin; the request's own host is never trusted. */
-function toRequest(req: Request, publicUrl: string): Request | undefined {
+function toRequest(req: Request, publicUrl: string, body?: string): Request | undefined {
   let source: URL;
   try {
     source = new URL(req.url);
@@ -12,8 +13,19 @@ function toRequest(req: Request, publicUrl: string): Request | undefined {
     return undefined;
   }
   const url = new URL(new URL(publicUrl).origin + source.pathname + source.search);
-  // No auth route reads a body, so none is forwarded.
-  return new Request(url, { method: req.method, headers: req.headers, redirect: 'manual' });
+  // Only the 2FA POST routes read a body, so it is forwarded for them alone.
+  if (body === undefined) return new Request(url, { method: req.method, headers: req.headers, redirect: 'manual' });
+  const headers = new Headers(req.headers);
+  headers.delete('content-length');
+  return new Request(url, { method: req.method, headers, redirect: 'manual', body });
+}
+
+function safePath(req: Request): string {
+  try {
+    return new URL(req.url).pathname;
+  } catch {
+    return '';
+  }
 }
 
 const json = (status: number, code: string, message: string): Response =>
@@ -29,7 +41,8 @@ const errorResponse = (err: unknown): Response =>
 export function authRouteHandlers(auth: Auth): { GET: (req: Request) => Promise<Response>; POST: (req: Request) => Promise<Response> } {
   const handler = async (req: Request): Promise<Response> => {
     try {
-      const built = toRequest(req, auth.publicUrl);
+      const body = auth.twoFactorEnabled && needsBody(req.method, safePath(req)) ? await readRequestText(req) : undefined;
+      const built = toRequest(req, auth.publicUrl, body);
       const response = built ? await auth.handle(built) : undefined;
       return response ?? json(404, 'not_found', 'Not found');
     } catch {
@@ -64,5 +77,13 @@ export function requireSession(auth: Auth): (req: Request) => Promise<SessionRes
     } catch (err) {
       return errorResponse(err);
     }
+  };
+}
+
+/** The state of a session held before the second factor (`{ state: 'verify' | 'enroll' }`), or `undefined`. */
+export function getPendingSession(auth: Auth): (req: Request) => Promise<PendingSession | undefined> {
+  return async (req) => {
+    const built = toRequest(req, auth.publicUrl);
+    return built ? auth.getPendingSession(built) : undefined;
   };
 }

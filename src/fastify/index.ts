@@ -1,6 +1,7 @@
 // Types only: fastify stays an optional peer and must never be imported at runtime.
 import type { FastifyInstance, FastifyReply, FastifyRequest, preHandlerAsyncHookHandler } from 'fastify';
-import type { Auth } from '../index.js';
+import type { Auth, PendingSession } from '../index.js';
+import { needsBody, readCapped } from '../body.js';
 import { AuthHttpError } from '../errors.js';
 import type { SessionUser } from '../session.js';
 
@@ -13,7 +14,7 @@ declare module 'fastify' {
 /** Request targets that are not origin-form paths (absolute-form, `*`) are never auth routes. */
 const isPathTarget = (req: FastifyRequest): boolean => req.raw.url?.startsWith('/') === true;
 
-function toRequest(req: FastifyRequest, publicUrl: string): Request {
+function toRequest(req: FastifyRequest, publicUrl: string, body?: string): Request {
   // Origin comes from config, never the Host header. raw.url keeps the full original path and query.
   const url = new URL(new URL(publicUrl).origin + req.raw.url!);
   const headers = new Headers();
@@ -21,8 +22,9 @@ function toRequest(req: FastifyRequest, publicUrl: string): Request {
     if (value === undefined) continue;
     headers.set(name, Array.isArray(value) ? value.join(', ') : value);
   }
-  // No auth route reads a body, so none is forwarded.
-  return new Request(url, { method: req.method, headers, redirect: 'manual' });
+  // Only the 2FA POST routes read a body, so it is forwarded for them alone.
+  if (body !== undefined) headers.delete('content-length');
+  return new Request(url, { method: req.method, headers, redirect: 'manual', ...(body !== undefined ? { body } : {}) });
 }
 
 /**
@@ -36,7 +38,9 @@ export function authPlugin(auth: Auth): (app: FastifyInstance) => Promise<void> 
       let response: Response | undefined;
       let body: Buffer | undefined;
       try {
-        response = await auth.handle(toRequest(req, auth.publicUrl));
+        // onRequest runs before fastify parses the body, so the raw stream is still unread here.
+        const requestBody = auth.twoFactorEnabled && needsBody(req.method, req.raw.url!.split('?')[0]!) ? await readCapped(req.raw as AsyncIterable<Buffer>) : undefined;
+        response = await auth.handle(toRequest(req, auth.publicUrl, requestBody));
         // Buffer first, so a failure while reading the body cannot leave a half-written response.
         if (response) body = Buffer.from(await response.arrayBuffer());
       } catch (err) {
@@ -73,4 +77,9 @@ export function requireSession(auth: Auth): preHandlerAsyncHookHandler {
       return reply.code(500).send({ error: { code: 'internal_error', message: 'Internal error' } });
     }
   };
+}
+
+/** The state of a session held before the second factor (`{ state: 'verify' | 'enroll' }`), or `undefined`. */
+export function getPendingSession(auth: Auth): (req: FastifyRequest) => Promise<PendingSession | undefined> {
+  return async (req) => (isPathTarget(req) ? auth.getPendingSession(toRequest(req, auth.publicUrl)) : undefined);
 }
