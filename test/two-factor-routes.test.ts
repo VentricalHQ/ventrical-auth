@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { base32Decode } from '../src/base32.js';
 import { decrypt, hashToken } from '../src/crypto.js';
 import { hotp, totpStep } from '../src/totp.js';
-import { totpAad } from '../src/twofactor.js';
+import { recoveryCodeHash, totpAad } from '../src/twofactor.js';
 import { FRONT, KEY, SESSION_COOKIE, req, setCookie, tfSetup, type Tf } from './helpers/two-factor.js';
 
 const DAY = 24 * 3600 * 1000;
@@ -340,7 +340,7 @@ describe('POST /auth/2fa/setup and /setup/confirm', () => {
     const user = (await t.store.findUserByIdentity('google', 'g1'))!;
     expect((await t.store.getTotp(user.id))!.confirmedAt).toEqual(t.clock.now);
     // Stored hashed, never in the clear.
-    expect([...t.store.recoveryCodes.get(user.id)!.keys()].sort()).toEqual(codes.map(hashToken).sort());
+    expect([...t.store.recoveryCodes.get(user.id)!.keys()].sort()).toEqual(codes.map((c) => recoveryCodeHash(KEY, c)).sort());
     expect(sessionRow(t, cookie).mfaVerifiedAt).toEqual(t.clock.now);
     expect(t.store.sessions.size).toBe(1);
     expect(t.store.sessions.has(hashToken(decodeURIComponent(other.cookie!.split('=')[1]!)))).toBe(false);
@@ -446,7 +446,7 @@ describe('POST /auth/2fa/recovery-codes', () => {
     expect(r.status).toBe(200);
     const codes: string[] = r.json!.recoveryCodes;
     expect(codes).toHaveLength(10);
-    expect([...t.store.recoveryCodes.get(user.id)!.keys()].sort()).toEqual(codes.map(hashToken).sort());
+    expect([...t.store.recoveryCodes.get(user.id)!.keys()].sort()).toEqual(codes.map((c) => recoveryCodeHash(KEY, c)).sort());
     const again = await t.signIn();
     expect((await t.post('/auth/2fa/verify', { recoveryCode: 'OLDCODE234' }, again.cookie)).status).toBe(401);
     expect((await t.post('/auth/2fa/verify', { recoveryCode: codes[3] }, again.cookie)).status).toBe(200);

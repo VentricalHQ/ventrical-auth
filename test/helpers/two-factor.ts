@@ -1,8 +1,8 @@
 import { createAuth, type AuthConfig, type AuthErrorEvent, type ProviderName, type ProviderProfile, type TwoFactorConfig } from '../../src/index.js';
 import { base32Encode } from '../../src/base32.js';
-import { encrypt, hashToken } from '../../src/crypto.js';
+import { encrypt } from '../../src/crypto.js';
 import { hotp, totpStep, generateTotpSecret } from '../../src/totp.js';
-import { totpAad } from '../../src/twofactor.js';
+import { recoveryCodeHash, totpAad } from '../../src/twofactor.js';
 import { fakeProvider } from './fake-provider.js';
 import { createMemoryStore, type MemoryStore, type MemoryTx } from './memory-store.js';
 import { req, setCookie, setCookies } from './request.js';
@@ -76,7 +76,7 @@ export function tfSetup(o: TfOptions = {}) {
     const secret = generateTotpSecret();
     const enc = encrypt(base32Encode(secret), KEY, totpAad(user.id));
     await store.setPendingTotpSecret(user.id, enc, now());
-    await store.confirmTotp(user.id, { expectedPendingEnc: enc, step: 0, now: now(), recoveryCodeHashes: (opts.recoveryCodes ?? []).map(hashToken) });
+    await store.confirmTotp(user.id, { expectedPendingEnc: enc, step: 0, now: now(), recoveryCodeHashes: (opts.recoveryCodes ?? []).map((c) => recoveryCodeHash(KEY, c)) });
     return { user, secret };
   }
 

@@ -122,6 +122,23 @@ export interface AuthStore<Tx = unknown> {
   // Two-factor methods. All optional so existing custom stores keep compiling; createAuth throws at startup when
   // `twoFactor` is configured and any is missing. Each one marked atomic must be a single conditional write.
 
+  /**
+   * Row locks that make the second factor's attempt limits hold under parallel requests. LOCK ORDER, for every caller and
+   * every store: the users row first (lockUser), then the user's user_totp row (lockTotp), then recovery_codes and
+   * sessions rows. Locks last until the transaction ends. A store without row locks (one transaction at a time) can make
+   * both trivial.
+   *
+   * Locks the user's users row: FOR SHARE (`share`) or FOR UPDATE (`update`). Returns false when the user does not
+   * exist or is suspended. Enrolling and disabling take `update` before they delete the user's other sessions, and
+   * sign-in takes `share` before it reads getTotp, so a sign-in cannot create a full session for a user that is being
+   * enrolled.
+   */
+  lockUser?(userId: string, mode: 'share' | 'update', tx: Tx): Promise<boolean>;
+  /**
+   * Reads the user's TOTP record and locks that row (FOR UPDATE) until the transaction ends, so verifications of one
+   * user run one at a time. Call lockUser first. Undefined (and nothing locked) when no row exists.
+   */
+  lockTotp?(userId: string, tx: Tx): Promise<TotpRecord | undefined>;
   /** The user's TOTP record, or undefined when none exists. */
   getTotp?(userId: string, tx?: Tx): Promise<TotpRecord | undefined>;
   /** Creates or replaces the unconfirmed secret (encrypted). Never touches a confirmed secret. */
