@@ -2,9 +2,9 @@
 
 OIDC sign-in for Ventrical services: Google, Microsoft and GitHub, with the security properties of the Kagaya backend's sign-in code it was extracted from. It has a framework-neutral core that speaks the Fetch API (`Request` and `Response`), thin adapters for Express, Next.js, Hono, Fastify and Postgres, and a storage interface so each app keeps its own database tables.
 
-> **Experimental (0.0.x): not yet recommended for production.** The API and the store contract may change between releases. Read [Security notes](#security-notes) before using it, and report vulnerabilities as described in [SECURITY.md](SECURITY.md).
+> **Pre-1.0 (0.x).** The API and the store contract can still change between minor releases, so pin the version you use. Read [Security notes](#security-notes) before using it, and report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
-Status: experimental. Releases are cut automatically from `main` (see [Release](#release)); until the first release exists, nothing is published.
+Releases are cut automatically from `main` (see [Release](#release)).
 
 Requirements: Node 22 or newer, ESM only. `openid-client` is pinned to exactly 6.8.8.
 
@@ -25,10 +25,10 @@ Requirements: Node 22 or newer, ESM only. `openid-client` is pinned to exactly 6
 ## Install
 
 ```json
-"@ventrical/auth": "^0.0.1"
+"@ventrical/auth": "^0.1.0"
 ```
 
-From npm the package ships prebuilt (`dist`). Until the first release exists you can install from git instead (`"@ventrical/auth": "github:VentricalHQ/ventrical-auth#staging"`, needs repository access); a git install builds itself because `prepare` runs `npm run build`. TypeScript consumers of the Express adapter also need `@types/express` (the adapter exports Express types), and consumers of `@ventrical/auth/pg` need `@types/pg` (the store's signature uses `pg` types). Express 5, Next (>=14), Hono 4 and Fastify 5 are optional peer dependencies, needed only for the matching entry point; install just the one you use. The Next adapter uses plain `Request` and `Response` and never imports `next` (not even as a type); the Hono and Fastify adapters import their framework as types only. `pg` is a regular dependency.
+From npm the package ships prebuilt (`dist`). Until 0.1.0 is published you can install from git instead (`"@ventrical/auth": "github:VentricalHQ/ventrical-auth#staging"`, needs repository access); a git install builds itself because `prepare` runs `npm run build`. TypeScript consumers of the Express adapter also need `@types/express` (the adapter exports Express types), and consumers of `@ventrical/auth/pg` need `@types/pg` (the store's signature uses `pg` types). Express 5, Next (>=14), Hono 4 and Fastify 5 are optional peer dependencies, needed only for the matching entry point; install just the one you use. The Next adapter uses plain `Request` and `Response` and never imports `next` (not even as a type); the Hono and Fastify adapters import their framework as types only. `pg` is a regular dependency.
 
 Entry points:
 
@@ -448,8 +448,8 @@ Use conventional commits: `feat:`, `fix:`, `perf:`, `revert:` produce a release,
 
 | Commit | Release while `0.x` |
 |---|---|
-| `fix:`, `feat:`, `perf:`, `revert:` | patch (0.0.1, 0.0.2, ...) |
-| a breaking change (`feat!:` or a `BREAKING CHANGE:` footer) | minor (0.1.0, 0.2.0, ...) |
+| `fix:`, `perf:`, `revert:` | patch (0.1.1, 0.1.2, ...) |
+| `feat:`, or a breaking change (`feat!:` or a `BREAKING CHANGE:` footer) | minor (0.1.0, 0.2.0, ...) |
 
 To reach `1.0.0`, remove the `releaseRules` from `.releaserc.json` and make the commit that declares the interface stable a breaking change.
 
