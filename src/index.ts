@@ -20,6 +20,7 @@ const nonEmpty = (v: unknown): boolean => typeof v === 'string' && v !== '';
 const TWO_FACTOR_STORE_METHODS = [
   'getTotp', 'setPendingTotpSecret', 'confirmTotp', 'deleteTotp', 'consumeTotpStep', 'recordTotpFailure', 'resetTotpFailures',
   'consumeRecoveryCode', 'replaceRecoveryCodes', 'markSessionVerified', 'markSessionPending', 'incrementSessionMfaAttempts', 'deleteOtherSessions',
+  'lockUser', 'lockTotp',
 ] as const;
 
 function validateTwoFactor(config: AuthConfig<any>): void {

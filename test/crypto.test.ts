@@ -65,3 +65,23 @@ describe('crypto', () => {
     expect(randomToken()).not.toBe(randomToken());
   });
 });
+
+describe('recovery code storage', () => {
+  it('is a keyed hash: not the plain SHA-256, different per key, same for a code however it is typed', async () => {
+    const { recoveryCodeHash } = await import('../src/twofactor.js');
+    const { hashToken } = await import('../src/crypto.js');
+    const k1 = Buffer.alloc(32, 1);
+    const k2 = Buffer.alloc(32, 2);
+    expect(recoveryCodeHash(k1, 'ABCDE23456')).not.toBe(hashToken('ABCDE23456'));
+    expect(recoveryCodeHash(k1, 'ABCDE23456')).not.toBe(recoveryCodeHash(k2, 'ABCDE23456'));
+    expect(recoveryCodeHash(k1, 'abcde-23456')).toBe(recoveryCodeHash(k1, 'ABCDE23456'));
+  });
+
+  it('deriveSubkey separates labels and does not return the master key', async () => {
+    const { deriveSubkey } = await import('../src/crypto.js');
+    const k = Buffer.alloc(32, 9);
+    expect(deriveSubkey(k, 'a').equals(deriveSubkey(k, 'b'))).toBe(false);
+    expect(deriveSubkey(k, 'a').equals(k)).toBe(false);
+    expect(deriveSubkey(k, 'a')).toHaveLength(32);
+  });
+});

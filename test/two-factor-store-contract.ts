@@ -9,7 +9,8 @@ const future = () => new Date(Date.now() + 864e5);
 
 type Full = AuthStore<any> & Required<Pick<AuthStore<any>,
   'getTotp' | 'setPendingTotpSecret' | 'confirmTotp' | 'deleteTotp' | 'consumeTotpStep' | 'recordTotpFailure' | 'resetTotpFailures'
-  | 'consumeRecoveryCode' | 'replaceRecoveryCodes' | 'markSessionVerified' | 'markSessionPending' | 'incrementSessionMfaAttempts' | 'deleteOtherSessions'>>;
+  | 'consumeRecoveryCode' | 'replaceRecoveryCodes' | 'markSessionVerified' | 'markSessionPending' | 'incrementSessionMfaAttempts' | 'deleteOtherSessions'
+  | 'lockUser' | 'lockTotp'>>;
 
 /** Behaviour every store used with `twoFactor` must have. Each test gets a fresh store from `make`. */
 export function twoFactorStoreContract(name: string, make: () => Promise<StoreHarness>): void {
@@ -32,6 +33,26 @@ export function twoFactorStoreContract(name: string, make: () => Promise<StoreHa
     }
     const session = (s: Full, userId: string, hash: string, expiresAt: Date, opts?: Parameters<Full['createSessionUnlessSuspended']>[5]) =>
       s.transaction((tx) => s.createSessionUnlessSuspended(userId, hash, expiresAt, IDENT, tx, opts));
+
+    describe('row locks', () => {
+      it('lockUser is true for a live user in both modes, false for an unknown or suspended one', async () => {
+        const { h, s, user } = await fresh();
+        expect(await s.transaction((tx) => s.lockUser(user.id, 'share', tx))).toBe(true);
+        expect(await s.transaction((tx) => s.lockUser(user.id, 'update', tx))).toBe(true);
+        expect(await s.transaction((tx) => s.lockUser('nobody', 'share', tx))).toBe(false);
+        await h.suspend(user.id);
+        expect(await s.transaction((tx) => s.lockUser(user.id, 'share', tx))).toBe(false);
+      });
+
+      it('lockTotp returns the record, or undefined when there is none', async () => {
+        const { s, user } = await fresh();
+        expect(await s.transaction((tx) => s.lockTotp(user.id, tx))).toBeUndefined();
+        await enrol(s, user.id);
+        const rec = await s.transaction((tx) => s.lockTotp(user.id, tx));
+        expect(rec?.confirmedAt).not.toBeNull();
+        expect(rec?.lastStep).toBe(100);
+      });
+    });
 
     describe('totp record', () => {
       it('has no record until a secret is set', async () => {

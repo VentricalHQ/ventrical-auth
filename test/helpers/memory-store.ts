@@ -12,7 +12,8 @@ interface StoredUser extends AuthUser { suspended: boolean }
 export interface MemoryTx { readonly id: number }
 
 type TwoFactorMethods = 'getTotp' | 'setPendingTotpSecret' | 'confirmTotp' | 'deleteTotp' | 'consumeTotpStep' | 'recordTotpFailure' | 'resetTotpFailures'
-  | 'consumeRecoveryCode' | 'replaceRecoveryCodes' | 'markSessionVerified' | 'markSessionPending' | 'incrementSessionMfaAttempts' | 'deleteOtherSessions';
+  | 'consumeRecoveryCode' | 'replaceRecoveryCodes' | 'markSessionVerified' | 'markSessionPending' | 'incrementSessionMfaAttempts' | 'deleteOtherSessions'
+  | 'lockUser' | 'lockTotp';
 
 export type MemoryStore = AuthStore<MemoryTx> & Required<Pick<AuthStore<MemoryTx>, TwoFactorMethods>> & {
   suspend(userId: string): void;
@@ -164,6 +165,14 @@ export function createMemoryStore(clock: () => Date = () => new Date()): MemoryS
     },
 
     // Two-factor. Bodies have no awaits, so each is atomic like a single conditional UPDATE.
+    // Transactions already run one at a time, so the row locks are satisfied by the queue itself.
+    async lockUser(userId) {
+      return users.has(userId) && !isSuspended(userId);
+    },
+    async lockTotp(userId) {
+      const t = totps.get(userId);
+      return t && { ...t };
+    },
     async getTotp(userId) {
       const t = totps.get(userId);
       return t && { ...t };

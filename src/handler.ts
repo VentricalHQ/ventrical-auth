@@ -292,6 +292,10 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
     const attempt = (found: Awaited<ReturnType<typeof config.store.findUserByIdentity>>) => config.store.transaction(async (tx) => {
       let user: AuthUser | undefined = found && { id: found.id, email: found.email, name: found.name };
       let isNew = false;
+      // With twoFactor, the user row is locked FOR SHARE before anything else is touched (lock order: users row first, then
+      // sessions rows, as confirm and disable take them). A confirm or disable (FOR UPDATE) is then either finished, and
+      // seen by the getTotp below, or waits for this sign-in and ends the session it creates.
+      if (tf && found) await config.store.lockUser!(found.id, 'share', tx);
       // Every sign-in, new or returning: a verified email that belongs to a suspended user (another account's row; the
       // signing-in user's own row is ignored) refuses the sign-in. Authoritative: locked, same tx as the writes below.
       if (profile.emailVerified && profile.email !== undefined
@@ -308,6 +312,7 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
       if (!user) {
         user = await config.store.createUserWithIdentity({ ...identity, ...(profile.name !== undefined ? { name: profile.name } : {}) }, tx);
         isNew = true;
+        if (tf) await config.store.lockUser!(user.id, 'share', tx);
       }
       // The request's old session (a valid one that is not the new one) goes with this sign-in: same tx, so a suspended
       // refusal below rolls the delete back and the person keeps it. Not done on the link path.

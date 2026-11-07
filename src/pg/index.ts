@@ -42,6 +42,25 @@ async function replaceCodes(q: Queryable, userId: string, hashes: string[]): Pro
   );
 }
 
+async function readTotp(q: Queryable, userId: string, lock: boolean) {
+  const r = await q.query(
+    `select secret_enc, pending_secret_enc, confirmed_at, last_step, failed_count, locked_until
+     from user_totp where user_id = $1${lock ? ' for update' : ''}`,
+    [userId],
+  );
+  const row = r.rows[0];
+  if (!row) return undefined;
+  return {
+    secretEnc: row.secret_enc as string | null,
+    pendingSecretEnc: row.pending_secret_enc as string | null,
+    confirmedAt: row.confirmed_at as Date | null,
+    // bigint arrives as a string; steps are far below 2^53.
+    lastStep: row.last_step === null ? null : Number(row.last_step),
+    failedCount: row.failed_count as number,
+    lockedUntil: row.locked_until as Date | null,
+  };
+}
+
 /**
  * Postgres-backed store. `transaction` is plain BEGIN/COMMIT/ROLLBACK (no savepoints): after a duplicate-identity
  * error the Postgres transaction is aborted, and the handler re-runs the whole transaction.
@@ -202,23 +221,17 @@ export function pgAuthStore(pool: pg.Pool): AuthStore<pg.PoolClient> {
       return r.rowCount ?? 0;
     },
 
+    async lockUser(userId, mode, tx) {
+      const r = await tx.query(`select suspended_at from users where id = $1 for ${mode === 'update' ? 'update' : 'share'}`, [userId]);
+      return r.rows.length > 0 && r.rows[0].suspended_at === null;
+    },
+
+    async lockTotp(userId, tx) {
+      return readTotp(tx, userId, true);
+    },
+
     async getTotp(userId, tx) {
-      const r = await db(tx).query(
-        `select secret_enc, pending_secret_enc, confirmed_at, last_step, failed_count, locked_until
-         from user_totp where user_id = $1`,
-        [userId],
-      );
-      const row = r.rows[0];
-      if (!row) return undefined;
-      return {
-        secretEnc: row.secret_enc as string | null,
-        pendingSecretEnc: row.pending_secret_enc as string | null,
-        confirmedAt: row.confirmed_at as Date | null,
-        // bigint arrives as a string; steps are far below 2^53.
-        lastStep: row.last_step === null ? null : Number(row.last_step),
-        failedCount: row.failed_count as number,
-        lockedUntil: row.locked_until as Date | null,
-      };
+      return readTotp(db(tx), userId, false);
     },
 
     async setPendingTotpSecret(userId, secretEnc, now, tx) {
