@@ -5,6 +5,7 @@ import { afterEach, beforeAll, afterAll, describe, expect, it } from 'vitest';
 import { DuplicateIdentityError } from '../../src/errors.js';
 import { migrationsDir, pgAuthStore } from '../../src/pg/index.js';
 import { storeContract, type StoreHarness } from '../store-contract.js';
+import { twoFactorStoreContract } from '../two-factor-store-contract.js';
 
 const URL_ENV = process.env.VENTRICAL_TEST_DATABASE_URL;
 
@@ -12,6 +13,7 @@ describe('migrationsDir', () => {
   it('is an absolute path holding the shipped SQL', () => {
     expect(isAbsolute(migrationsDir)).toBe(true);
     expect(readdirSync(migrationsDir)).toContain('001_auth.sql');
+    expect(readdirSync(migrationsDir)).toContain('002_totp.sql');
   });
 });
 
@@ -41,6 +43,7 @@ describe.skipIf(!URL_ENV)('pgAuthStore (live postgres)', () => {
   }
 
   storeContract('pg', makeSchema);
+  twoFactorStoreContract('pg', makeSchema);
 
   describe('pg specifics', () => {
     let h: Awaited<ReturnType<typeof makeSchema>>;
@@ -73,6 +76,66 @@ describe.skipIf(!URL_ENV)('pgAuthStore (live postgres)', () => {
       const err = await h.store.transaction((tx) => h.store.createSessionUnlessSuspended(u.id, 'same-hash', new Date(Date.now() + 1e6), { provider: 'github', subject: 'x1' }, tx)).catch((e: unknown) => e);
       expect(err).toBeInstanceOf(Error);
       expect(err).not.toBeInstanceOf(DuplicateIdentityError);
+    });
+
+    const migrationFiles = () => readdirSync(migrationsDir).filter((n) => n.endsWith('.sql')).sort();
+    /** A schema with only the named migrations applied. */
+    async function schemaWith(files: string[]) {
+      const schema = `auth_test_${Math.random().toString(36).slice(2, 10)}`;
+      await admin.query(`create schema ${schema}`);
+      const pool = new pg.Pool({ connectionString: URL_ENV, max: 2, options: `-c search_path=${schema}` });
+      for (const f of files) await pool.query(readFileSync(join(migrationsDir, f), 'utf8'));
+      return { pool, close: async () => { await pool.end(); await admin.query(`drop schema ${schema} cascade`); } };
+    }
+
+    it('migration 002 applies on top of 001 with existing users and sessions, which stay valid and not pending', async () => {
+      const [first, ...rest] = migrationFiles();
+      const m = await schemaWith([first!]);
+      try {
+        const store = pgAuthStore(m.pool);
+        const user = await store.createUserWithIdentity({ provider: 'google', subject: 'old', emailVerified: true });
+        await store.transaction((tx) => store.createSessionUnlessSuspended(user.id, 'old-session', new Date(Date.now() + 1e6), { provider: 'google', subject: 'old' }, tx));
+        for (const f of rest) await m.pool.query(readFileSync(join(migrationsDir, f), 'utf8'));
+        const found = await store.getSessionWithExpiry('old-session', new Date());
+        expect(found?.user.id).toBe(user.id);
+        expect(found?.mfaPending).toBe(false);
+        expect(found?.mfaVerifiedAt).toBeNull();
+        expect(found?.mfaAttempts).toBe(0);
+      } finally {
+        await m.close();
+      }
+    });
+
+    it('without migration 002 the store still signs people in and reports no mfa fields (twoFactor off)', async () => {
+      const m = await schemaWith([migrationFiles()[0]!]);
+      try {
+        const store = pgAuthStore(m.pool);
+        const user = await store.createUserWithIdentity({ provider: 'google', subject: 'old', emailVerified: true });
+        await store.transaction((tx) => store.createSessionUnlessSuspended(user.id, 's1', new Date(Date.now() + 1e6), { provider: 'google', subject: 'old' }, tx));
+        const found = await store.getSessionWithExpiry('s1', new Date());
+        expect(found?.user.id).toBe(user.id);
+        expect(found?.mfaPending).toBeUndefined();
+      } finally {
+        await m.close();
+      }
+    });
+
+    it('deleting a user cascades to the totp record, recovery codes and sessions', async () => {
+      const u = await h.store.createUserWithIdentity({ provider: 'google', subject: 'cascade', emailVerified: true });
+      await h.store.setPendingTotpSecret!(u.id, 'enc', new Date());
+      await h.store.confirmTotp!(u.id, { expectedPendingEnc: 'enc', step: 1, now: new Date(), recoveryCodeHashes: ['x'] });
+      await h.store.transaction((tx) => h.store.createSessionUnlessSuspended(u.id, 'cascade-s', new Date(Date.now() + 1e6), { provider: 'google', subject: 'cascade' }, tx));
+      await h.pool.query('delete from users where id = $1', [u.id]);
+      expect((await h.pool.query('select 1 from user_totp where user_id = $1', [u.id])).rowCount).toBe(0);
+      expect((await h.pool.query('select 1 from recovery_codes where user_id = $1', [u.id])).rowCount).toBe(0);
+      expect((await h.pool.query('select 1 from sessions where user_id = $1', [u.id])).rowCount).toBe(0);
+    });
+
+    it('the secret column holds only what the caller passed (no plaintext added by the store)', async () => {
+      const u = await h.store.createUserWithIdentity({ provider: 'google', subject: 'blob', emailVerified: true });
+      await h.store.setPendingTotpSecret!(u.id, 'v2:opaque:blob:here', new Date());
+      const r = await h.pool.query('select pending_secret_enc from user_totp where user_id = $1', [u.id]);
+      expect(r.rows[0].pending_secret_enc).toBe('v2:opaque:blob:here');
     });
 
     it('transaction releases the client on throw and on success', async () => {
