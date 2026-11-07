@@ -1,18 +1,30 @@
 import { DuplicateIdentityError } from '../../src/errors.js';
-import type { AuthStore, AuthUser, NewIdentity } from '../../src/types.js';
+import type { AuthStore, AuthUser, NewIdentity, TotpRecord } from '../../src/types.js';
 
 interface StoredIdentity extends NewIdentity { userId: string }
-interface StoredSession { userId: string; expiresAt: Date; createdAt: Date; identity: { provider: string; subject: string } }
+interface StoredSession {
+  userId: string; expiresAt: Date; createdAt: Date; identity: { provider: string; subject: string };
+  mfaPending: boolean; mfaAttempts: number; mfaVerifiedAt: Date | null; mfaRedirect: string | null;
+}
 interface StoredUser extends AuthUser { suspended: boolean }
 
 /** A distinct handle per transaction, so tests can tell whether two calls shared one. */
 export interface MemoryTx { readonly id: number }
 
-export type MemoryStore = AuthStore<MemoryTx> & {
+type TwoFactorMethods = 'getTotp' | 'setPendingTotpSecret' | 'confirmTotp' | 'deleteTotp' | 'consumeTotpStep' | 'recordTotpFailure' | 'resetTotpFailures'
+  | 'consumeRecoveryCode' | 'replaceRecoveryCodes' | 'markSessionVerified' | 'markSessionPending' | 'incrementSessionMfaAttempts' | 'deleteOtherSessions'
+  | 'lockUser' | 'lockTotp';
+
+export type MemoryStore = AuthStore<MemoryTx> & Required<Pick<AuthStore<MemoryTx>, TwoFactorMethods>> & {
   suspend(userId: string): void;
   /** Test-only: reassigns an identity to another user (as an account merge would). */
   moveIdentity(provider: string, subject: string, toUserId: string): void;
   sessions: Map<string, StoredSession>;
+  /** Test-only: the raw TOTP records and recovery codes, to assert nothing is kept in the clear. */
+  totps: Map<string, TotpRecord>;
+  recoveryCodes: Map<string, Map<string, Date | null>>;
+  /** Test-only: when set, getSessionWithExpiry omits the 2FA fields, like a store that ignores the pending flag. */
+  ignorePendingFlag: boolean;
 };
 
 /** `clock` stamps created_at on new sessions (the handler's injected clock in tests); defaults to real time. */
@@ -20,6 +32,9 @@ export function createMemoryStore(clock: () => Date = () => new Date()): MemoryS
   let users = new Map<string, StoredUser>();
   let identities: StoredIdentity[] = [];
   let sessions = new Map<string, StoredSession>();
+  let totps = new Map<string, TotpRecord>();
+  let recovery = new Map<string, Map<string, Date | null>>();
+  let ignorePendingFlag = false;
   let seq = 0;
   let txSeq = 0;
   // Transactions run one at a time (like row-level conflicts would force), so a rollback snapshot never erases a concurrent commit.
@@ -35,6 +50,8 @@ export function createMemoryStore(clock: () => Date = () => new Date()): MemoryS
       users: new Map([...users].map(([k, u]) => [k, { ...u }] as const)),
       identities: identities.map((i) => ({ ...i })),
       sessions: new Map([...sessions].map(([k, s]) => [k, { ...s, identity: { ...s.identity } }] as const)),
+      totps: new Map([...totps].map(([k, t]) => [k, { ...t }] as const)),
+      recovery: new Map([...recovery].map(([k, m]) => [k, new Map(m)] as const)),
       seq,
     };
     try {
@@ -43,6 +60,8 @@ export function createMemoryStore(clock: () => Date = () => new Date()): MemoryS
       users = snap.users;
       identities = snap.identities;
       sessions = snap.sessions;
+      totps = snap.totps;
+      recovery = snap.recovery;
       seq = snap.seq;
       throw err;
     }
@@ -50,6 +69,10 @@ export function createMemoryStore(clock: () => Date = () => new Date()): MemoryS
 
   const store: MemoryStore = {
     get sessions() { return sessions; },
+    get totps() { return totps; },
+    get recoveryCodes() { return recovery; },
+    get ignorePendingFlag() { return ignorePendingFlag; },
+    set ignorePendingFlag(v: boolean) { ignorePendingFlag = v; },
     suspend(userId) {
       const u = users.get(userId);
       if (u) u.suspended = true;
@@ -96,9 +119,13 @@ export function createMemoryStore(clock: () => Date = () => new Date()): MemoryS
       const e = norm(email);
       return e !== undefined && identities.some((i) => i.userId !== opts?.exceptUserId && i.emailVerified && norm(i.email) === e && isSuspended(i.userId));
     },
-    async createSessionUnlessSuspended(userId, idHash, expiresAt, identity) {
+    async createSessionUnlessSuspended(userId, idHash, expiresAt, identity, _tx, opts) {
       if (!users.has(userId) || isSuspended(userId)) return false; // unknown user: refused, as the pg store does
-      sessions.set(idHash, { userId, expiresAt, createdAt: clock(), identity });
+      const pending = opts?.pending;
+      sessions.set(idHash, {
+        userId, expiresAt, createdAt: clock(), identity,
+        mfaPending: pending !== undefined, mfaAttempts: 0, mfaVerifiedAt: null, mfaRedirect: pending?.redirect ?? null,
+      });
       return true;
     },
     async getSessionWithExpiry(idHash, now) {
@@ -108,7 +135,9 @@ export function createMemoryStore(clock: () => Date = () => new Date()): MemoryS
       if (!u || u.suspended) return undefined;
       const i = identities.find((x) => x.provider === s.identity.provider && x.subject === s.identity.subject && x.userId === s.userId);
       const verifiedEmail = i && i.emailVerified && i.email ? i.email : null;
-      return { user: publicUser(u), expiresAt: s.expiresAt, createdAt: s.createdAt, identity: s.identity, verifiedEmail };
+      const base = { user: publicUser(u), expiresAt: s.expiresAt, createdAt: s.createdAt, identity: s.identity, verifiedEmail };
+      if (ignorePendingFlag) return base;
+      return { ...base, mfaPending: s.mfaPending, mfaVerifiedAt: s.mfaVerifiedAt, mfaAttempts: s.mfaAttempts, mfaRedirect: s.mfaRedirect };
     },
     async touchSession(idHash, expiresAt) {
       const s = sessions.get(idHash);
@@ -133,6 +162,94 @@ export function createMemoryStore(clock: () => Date = () => new Date()): MemoryS
     async isSuspendedCredential(idHash, now) {
       const s = sessions.get(idHash);
       return !!s && s.expiresAt.getTime() > now.getTime() && isSuspended(s.userId);
+    },
+
+    // Two-factor. Bodies have no awaits, so each is atomic like a single conditional UPDATE.
+    // Transactions already run one at a time, so the row locks are satisfied by the queue itself.
+    async lockUser(userId) {
+      return users.has(userId) && !isSuspended(userId);
+    },
+    async lockTotp(userId) {
+      const t = totps.get(userId);
+      return t && { ...t };
+    },
+    async getTotp(userId) {
+      const t = totps.get(userId);
+      return t && { ...t };
+    },
+    async setPendingTotpSecret(userId, secretEnc) {
+      if (!users.has(userId)) throw new Error('foreign key violation: unknown user');
+      const t = totps.get(userId);
+      if (t) t.pendingSecretEnc = secretEnc;
+      else totps.set(userId, { secretEnc: null, pendingSecretEnc: secretEnc, confirmedAt: null, lastStep: null, failedCount: 0, lockedUntil: null });
+    },
+    async confirmTotp(userId, p) {
+      const t = totps.get(userId);
+      if (!t || t.pendingSecretEnc === null || t.pendingSecretEnc !== p.expectedPendingEnc) return false;
+      Object.assign(t, { secretEnc: t.pendingSecretEnc, pendingSecretEnc: null, confirmedAt: p.now, lastStep: p.step, failedCount: 0, lockedUntil: null });
+      recovery.set(userId, new Map(p.recoveryCodeHashes.map((h) => [h, null] as const)));
+      return true;
+    },
+    async deleteTotp(userId) {
+      totps.delete(userId);
+      recovery.delete(userId);
+    },
+    async consumeTotpStep(userId, step, now) {
+      const t = totps.get(userId);
+      if (!t || t.confirmedAt === null) return false;
+      if (t.lockedUntil !== null && t.lockedUntil.getTime() > now.getTime()) return false;
+      if (t.lastStep !== null && t.lastStep >= step) return false;
+      t.lastStep = step;
+      return true;
+    },
+    async recordTotpFailure(userId, p) {
+      const t = totps.get(userId);
+      if (!t) return { locked: false, lockedUntil: null };
+      const lockExpired = t.lockedUntil !== null && t.lockedUntil.getTime() <= p.now.getTime();
+      if (lockExpired) { t.lockedUntil = null; t.failedCount = 0; }
+      t.failedCount += 1;
+      if (t.failedCount >= p.maxAttempts) {
+        t.lockedUntil = new Date(p.now.getTime() + p.lockoutMs);
+        t.failedCount = 0;
+      }
+      const locked = t.lockedUntil !== null && t.lockedUntil.getTime() > p.now.getTime();
+      return { locked, lockedUntil: locked ? t.lockedUntil : null };
+    },
+    async resetTotpFailures(userId) {
+      const t = totps.get(userId);
+      if (t) { t.failedCount = 0; t.lockedUntil = null; }
+    },
+    async consumeRecoveryCode(userId, codeHash, now) {
+      const codes = recovery.get(userId);
+      if (!codes || !codes.has(codeHash) || codes.get(codeHash) !== null) return false;
+      const t = totps.get(userId);
+      if (t?.lockedUntil && t.lockedUntil.getTime() > now.getTime()) return false;
+      codes.set(codeHash, now);
+      return true;
+    },
+    async replaceRecoveryCodes(userId, hashes) {
+      recovery.set(userId, new Map(hashes.map((h) => [h, null] as const)));
+    },
+    async markSessionVerified(idHash, userId, p) {
+      const s = sessions.get(idHash);
+      if (!s || s.userId !== userId || isSuspended(userId) || s.expiresAt.getTime() <= p.now.getTime()) return false;
+      Object.assign(s, { mfaPending: false, mfaVerifiedAt: p.now, expiresAt: p.expiresAt, mfaRedirect: null });
+      return true;
+    },
+    async markSessionPending(idHash, expiresAt) {
+      const s = sessions.get(idHash);
+      if (s && !s.mfaPending && s.mfaVerifiedAt === null) { s.mfaPending = true; s.expiresAt = expiresAt; }
+    },
+    async incrementSessionMfaAttempts(idHash) {
+      const s = sessions.get(idHash);
+      if (!s || !s.mfaPending) return 0;
+      s.mfaAttempts += 1;
+      return s.mfaAttempts;
+    },
+    async deleteOtherSessions(userId, keepIdHash) {
+      let n = 0;
+      for (const [h, s] of sessions) if (s.userId === userId && h !== keepIdHash) { sessions.delete(h); n++; }
+      return n;
     },
   };
   return store;

@@ -19,9 +19,29 @@ export const REFRESH_BELOW_MS = 29 * 24 * 60 * 60 * 1000;
 export interface SessionResult {
   user: SessionUser;
   id: string;
+  /** When this session passed the second factor; null when it has not (or two-factor is off). */
+  mfaVerifiedAt: Date | null;
   /** Present when the session was refreshed; the caller must send it as Set-Cookie. */
   setCookie?: string;
 }
+
+/** What a pending user must do: enter a code from their authenticator, or set one up first. */
+export interface PendingSession {
+  state: 'verify' | 'enroll';
+}
+
+/** A session held before the second factor passed. Never returned by getSession or requireSession. */
+export interface PendingResolved extends PendingSession {
+  id: string;
+  idHash: string;
+  user: SessionUser;
+  createdAt: Date | undefined;
+  expiresAt: Date;
+  attempts: number;
+  redirect: string | null;
+}
+
+export type Resolved = { kind: 'full'; session: SessionResult; idHash: string; createdAt: Date | undefined } | ({ kind: 'pending' } & PendingResolved);
 
 export function newSessionId(): { id: string; idHash: string } {
   const id = randomToken();
@@ -36,6 +56,8 @@ export interface SessionsConfig {
   sessionTtlMs: number;
   sessionMaxAgeMs?: number;
   clock: () => Date;
+  /** Present when `twoFactor` is configured. `requiredForAll` is `required === true`. */
+  mfa?: { requiredForAll: boolean; pendingTtlMs: number };
 }
 
 export function makeSessions(cfg: SessionsConfig) {
@@ -65,7 +87,8 @@ export function makeSessions(cfg: SessionsConfig) {
     return parseCookies(request.headers.get('cookie'))[cfg.cookieNames.session] || undefined;
   }
 
-  async function lookup(request: Request, now: Date): Promise<SessionResult | undefined> {
+  /** Cookie id, the stored row, and the absolute-cap check shared by every kind of session. */
+  async function load(request: Request, now: Date) {
     const id = readId(request);
     if (!id) return undefined;
     const idHash = hashToken(id);
@@ -76,7 +99,41 @@ export function makeSessions(cfg: SessionsConfig) {
       await Promise.resolve(cfg.store.deleteSession(idHash)).catch(() => undefined);
       return undefined;
     }
-    const result: SessionResult = { user: { ...found.user, verifiedEmail: found.verifiedEmail ?? null }, id };
+    return { id, idHash, found };
+  }
+
+  async function pendingState(userId: string): Promise<'verify' | 'enroll'> {
+    const totp = await cfg.store.getTotp?.(userId);
+    return totp && totp.confirmedAt !== null ? 'verify' : 'enroll';
+  }
+
+  /**
+   * Resolves the cookie to a full session, a pending one, or nothing. A pending row is never reported as full, whether
+   * or not twoFactor is configured, and with twoFactor configured a row whose pending flag the store did not report
+   * (a boolean) is treated as signed out: unknown means closed.
+   */
+  async function resolve(request: Request, now: Date): Promise<Resolved | undefined> {
+    const loaded = await load(request, now);
+    if (!loaded) return undefined;
+    const { id, idHash, found } = loaded;
+    const user: SessionUser = { ...found.user, verifiedEmail: found.verifiedEmail ?? null };
+    let pending = found.mfaPending === true;
+    let expiresAt = found.expiresAt;
+    if (cfg.mfa && typeof found.mfaPending !== 'boolean') return undefined;
+    if (cfg.mfa && !pending && cfg.mfa.requiredForAll && !found.mfaVerifiedAt) {
+      // required: true and this session never passed the second factor: hold it, with a pending life from now (never
+      // longer than it already had). Written once; from then on it is an ordinary pending row.
+      expiresAt = new Date(Math.min(found.expiresAt.getTime(), now.getTime() + cfg.mfa.pendingTtlMs));
+      await cfg.store.markSessionPending?.(idHash, expiresAt);
+      pending = true;
+    }
+    if (pending) {
+      return {
+        kind: 'pending', id, idHash, user, createdAt: found.createdAt, expiresAt,
+        state: await pendingState(found.user.id), attempts: found.mfaAttempts ?? 0, redirect: found.mfaRedirect ?? null,
+      };
+    }
+    const result: SessionResult = { user, id, mfaVerifiedAt: found.mfaVerifiedAt ?? null };
     if (found.expiresAt.getTime() - now.getTime() < REFRESH_BELOW_MS) {
       // A store without createdAt cannot be capped on refresh: the plain ttl applies.
       const next = found.createdAt ? expiryFor(now, found.createdAt) : new Date(now.getTime() + cfg.sessionTtlMs);
@@ -86,7 +143,18 @@ export function makeSessions(cfg: SessionsConfig) {
         result.setCookie = sessionCookie(id, next.getTime() - now.getTime());
       }
     }
-    return result;
+    return { kind: 'full', session: result, idHash, createdAt: found.createdAt };
+  }
+
+  async function lookup(request: Request, now: Date): Promise<SessionResult | undefined> {
+    const r = await resolve(request, now);
+    return r?.kind === 'full' ? r.session : undefined;
+  }
+
+  async function getPendingSession(request: Request): Promise<PendingSession | undefined> {
+    if (!cfg.mfa) return undefined;
+    const r = await resolve(request, cfg.clock());
+    return r?.kind === 'pending' ? { state: r.state } : undefined;
   }
 
   async function getSession(request: Request): Promise<SessionResult | undefined> {
@@ -105,5 +173,5 @@ export function makeSessions(cfg: SessionsConfig) {
     throw new AuthHttpError(401, 'unauthenticated', 'Sign in required');
   }
 
-  return { getSession, requireSession, sessionCookie, clearSessionCookie, newExpiry };
+  return { getSession, requireSession, getPendingSession, resolve, readId, sessionCookie, clearSessionCookie, newExpiry, expiryFor };
 }

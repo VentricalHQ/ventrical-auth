@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync, randomBytes } from 'node:crypto';
 
 const VERSION = 'v2';
 const ALGORITHM = 'aes-256-gcm';
@@ -72,4 +72,18 @@ export function hashToken(token: string): string {
 /** Random URL-safe token. Default 32 bytes of entropy. */
 export function randomToken(bytes = 32): string {
   return randomBytes(bytes).toString('base64url');
+}
+
+/**
+ * A 32-byte key for one purpose, derived from the master key with HKDF-SHA256. `label` is the domain separator: two
+ * labels give unrelated keys, and neither reveals the master key.
+ */
+export function deriveSubkey(key: Buffer, label: string): Buffer {
+  assertKey(key);
+  return Buffer.from(hkdfSync('sha256', key, Buffer.alloc(0), Buffer.from(label, 'utf8'), KEY_BYTES));
+}
+
+/** HMAC-SHA256 hex digest: a keyed hash, so a stored value cannot be guessed offline without the key. */
+export function hmacHex(key: Buffer, value: string): string {
+  return createHmac('sha256', key).update(value, 'utf8').digest('hex');
 }

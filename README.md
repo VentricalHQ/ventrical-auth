@@ -2,9 +2,9 @@
 
 OIDC sign-in for Ventrical services: Google, Microsoft and GitHub, with the security properties of the Kagaya backend's sign-in code it was extracted from. It has a framework-neutral core that speaks the Fetch API (`Request` and `Response`), thin adapters for Express, Next.js, Hono, Fastify and Postgres, and a storage interface so each app keeps its own database tables.
 
-> **Experimental (0.0.x): not yet recommended for production.** The API and the store contract may change between releases. Read [Security notes](#security-notes) before using it, and report vulnerabilities as described in [SECURITY.md](SECURITY.md).
+> **Pre-1.0 (0.x).** The API and the store contract can still change between minor releases, so pin the version you use. Read [Security notes](#security-notes) before using it, and report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
-Status: experimental. Releases are cut automatically from `main` (see [Release](#release)); until the first release exists, nothing is published.
+Releases are cut automatically from `main` (see [Release](#release)).
 
 Requirements: Node 22 or newer, ESM only. `openid-client` is pinned to exactly 6.8.8.
 
@@ -25,10 +25,10 @@ Requirements: Node 22 or newer, ESM only. `openid-client` is pinned to exactly 6
 ## Install
 
 ```json
-"@ventrical/auth": "^0.0.1"
+"@ventrical/auth": "^0.1.0"
 ```
 
-From npm the package ships prebuilt (`dist`). Until the first release exists you can install from git instead (`"@ventrical/auth": "github:VentricalHQ/ventrical-auth#staging"`, needs repository access); a git install builds itself because `prepare` runs `npm run build`. TypeScript consumers of the Express adapter also need `@types/express` (the adapter exports Express types), and consumers of `@ventrical/auth/pg` need `@types/pg` (the store's signature uses `pg` types). Express 5, Next (>=14), Hono 4 and Fastify 5 are optional peer dependencies, needed only for the matching entry point; install just the one you use. The Next adapter uses plain `Request` and `Response` and never imports `next` (not even as a type); the Hono and Fastify adapters import their framework as types only. `pg` is a regular dependency.
+From npm the package ships prebuilt (`dist`). Until 0.1.0 is published you can install from git instead (`"@ventrical/auth": "github:VentricalHQ/ventrical-auth#staging"`, needs repository access); a git install builds itself because `prepare` runs `npm run build`. TypeScript consumers of the Express adapter also need `@types/express` (the adapter exports Express types), and consumers of `@ventrical/auth/pg` need `@types/pg` (the store's signature uses `pg` types). Express 5, Next (>=14), Hono 4 and Fastify 5 are optional peer dependencies, needed only for the matching entry point; install just the one you use. The Next adapter uses plain `Request` and `Response` and never imports `next` (not even as a type); the Hono and Fastify adapters import their framework as types only. `pg` is a regular dependency.
 
 Entry points:
 
@@ -88,6 +88,7 @@ app.get('/api/me', requireSession(auth), (req, res) => res.json({ id: req.user!.
 | `cookieDomain` | Optional `Domain` attribute for both cookies. Setting it switches the default cookie names back to the plain ones. An explicit `cookieNames` value that starts with `__Host-` is always Secure with `Path=/` and no `Domain`, ignoring `cookieDomain`. |
 | `sessionTtlMs` | Session life, default 30 days. |
 | `sessionMaxAgeMs` | Absolute cap on a session's life, counted from its creation, default 90 days. Refresh never extends a session beyond it, and a session past it is signed out and deleted. Positive, finite. A custom store must return `createdAt` from `getSessionWithExpiry` for the cap to apply to its sessions. |
+| `twoFactor` | Optional TOTP second factor; see [Two-factor authentication](#two-factor-authentication-totp). Unset, the package behaves exactly as without the feature. |
 | `onErrorTimeoutMs` | Longest wait for `hooks.onError` before responding anyway, default 2000. Positive, finite, at most 2147483647 (the `setTimeout` maximum). |
 | `clock` | Optional `() => Date`, for tests. |
 | `fetch` | Optional `fetch` used for discovery, the token endpoint, the JWKS and GitHub's API. |
@@ -101,15 +102,17 @@ Routes served by `handle` (and so by `authRouter`):
 - `GET /auth/:provider/callback`
 - `POST /auth/logout`
 - `POST /auth/logout-everywhere`
+- With `twoFactor` configured, the `/auth/2fa/*` routes listed in [Two-factor authentication](#two-factor-authentication-totp).
 
 `/api/me` is not in the package: it returns app-specific fields.
 
 ### The core
 
-`createAuth` returns `{ publicUrl, handle, getSession, requireSession }`:
+`createAuth` returns `{ publicUrl, twoFactorEnabled, handle, getSession, requireSession, getPendingSession }`:
 
 - `handle(request: Request): Promise<Response | undefined>` serves the auth routes. It returns `undefined` for any path it does not own, **and also for the wrong method on an owned path** (for example `POST /auth/providers`), so the host application decides what a 404 or 405 looks like.
-- `getSession(request)` returns `{ user, id, setCookie? }` (`user` is the `AuthUser` plus `verifiedEmail`) or `undefined`. When `setCookie` is present the session was refreshed and the caller must send it as `Set-Cookie`.
+- `getSession(request)` returns `{ user, id, mfaVerifiedAt, setCookie? }` (`user` is the `AuthUser` plus `verifiedEmail`; `mfaVerifiedAt` is a `Date` once the session passed the second factor, otherwise `null`) or `undefined`. When `setCookie` is present the session was refreshed and the caller must send it as `Set-Cookie`. A session still waiting for its second factor is **never** returned: it reads as signed out.
+- `getPendingSession(request)` returns `{ state: 'verify' | 'enroll' }` for a session waiting for its second factor, otherwise `undefined` (also always `undefined` when `twoFactor` is not configured). Use it on your `/2fa` page.
 - `requireSession(request)` is like `getSession` but throws `AuthHttpError` (`401 unauthenticated`, or `403 account_suspended` when the cookie belongs to a currently suspended user).
 
 > **Warning**
@@ -120,17 +123,18 @@ The core never touches Express's `req` or `res`. Cookies are read from the `Cook
 
 ### Express adapter
 
-`@ventrical/auth/express` has three exports (plus the `req.user` type augmentation):
+`@ventrical/auth/express` has four exports (plus the `req.user` type augmentation):
 
 - `authRouter(auth)`: an Express request handler for every auth route. Unknown paths and wrong methods fall through to `next()`. Request targets that are not origin-form paths (absolute-form, `*`) are never treated as auth routes. Unexpected errors go to `next()` with a fixed message, never the original detail.
 - `requireSession(auth)`: middleware that sets `req.user`, appends a refreshed session cookie when needed, and passes an `AuthHttpError` to `next()` on failure (`401`, or `403` for a suspended account; the same non-path targets get `401`). Map it to a response in your error handler.
 - `currentSession(auth)`: returns `async (req, res?) => SessionResult | undefined` for routes that serve signed-in and anonymous callers alike. It sets `req.user` when there is a session, appends a refreshed cookie to `res` when one is passed, and resolves `undefined` (never rejects) for an anonymous caller. Only unexpected store failures reject.
+- `getPendingSession(auth)`: returns `async (req) => { state: 'verify' | 'enroll' } | undefined`. See [Two-factor authentication](#two-factor-authentication-totp). `authRouter` reads a request body only for the five `/auth/2fa/*` POST routes and only when `twoFactor` is configured; it uses `req.body` if `express.json()` already parsed it, otherwise the raw stream (capped at 4096 characters).
 
 ### Next.js, Hono and Fastify adapters
 
-Each is a thin layer over `handle` and `requireSession`. All of them build the request URL from `publicUrl`, never from the `Host` header, never forward a body (no auth route reads one), and answer unexpected errors with a fixed message. Auth failures use the same JSON shape as the core, `{ "error": { "code", "message" } }`: `401 unauthenticated`, or `403 account_suspended` when the cookie belongs to a suspended user. Mount the auth routes at the root, as with Express.
+Each is a thin layer over `handle` and `requireSession`. All of them build the request URL from `publicUrl`, never from the `Host` header, forward a request body only for the five `/auth/2fa/*` POST routes (and only when `twoFactor` is configured; no other auth route reads one), and answer unexpected errors with a fixed message. Auth failures use the same JSON shape as the core, `{ "error": { "code", "message" } }`: `401 unauthenticated`, or `403 account_suspended` when the cookie belongs to a suspended user. Mount the auth routes at the root, as with Express.
 
-**Next.js** (`@ventrical/auth/next`, App Router). `next` is an optional peer and is not a runtime dependency. Exports `authRouteHandlers(auth)` (`{ GET, POST }` for a catch-all route; paths the core does not serve answer `404`), `getSessionFromRequest(auth)` (resolves the session or `undefined`) and `requireSession(auth)` (resolves the session, or a ready `401`/`403` `Response` to return). When `setCookie` is present on a session, append it to your response as `Set-Cookie`.
+**Next.js** (`@ventrical/auth/next`, App Router). `next` is an optional peer and is not a runtime dependency. Exports `authRouteHandlers(auth)` (`{ GET, POST }` for a catch-all route; paths the core does not serve answer `404`), `getSessionFromRequest(auth)` (resolves the session or `undefined`) `requireSession(auth)` (resolves the session, or a ready `401`/`403` `Response` to return) and `getPendingSession(auth)` (`(req: Request) => { state } | undefined`). When `setCookie` is present on a session, append it to your response as `Set-Cookie`.
 
 ```ts
 // app/auth/[...auth]/route.ts
@@ -180,7 +184,7 @@ app.get('/api/me', { preHandler: requireSession(auth) }, async (req) => ({ id: r
 
 ## POST routes and the Origin check
 
-Log out and log out everywhere are state-changing POSTs, protected by `isSameOrigin`: the request must carry an `Origin` header, or else a `Referer`, whose origin equals the origin of `frontendUrl` **or** of `publicUrl`. Both are trusted because backend-served pages (such as an app's own authorize page) post from the public URL. A request with neither header, or with any other origin, is rejected with `403 forbidden` and nothing is changed.
+Log out, log out everywhere and every `POST /auth/2fa/*` route are state-changing POSTs, protected by `isSameOrigin`: the request must carry an `Origin` header, or else a `Referer`, whose origin equals the origin of `frontendUrl` **or** of `publicUrl`. Both are trusted because backend-served pages (such as an app's own authorize page) post from the public URL. A request with neither header, or with any other origin, is rejected with `403 forbidden` and nothing is changed.
 
 ## Same-site deployment only
 
@@ -196,6 +200,74 @@ The frontend and the API must share a registrable domain: sessions use `sameSite
 - Fails closed: a JWKS fetch error, a non-OK or non-JSON response, a malformed key set or a bad signature all end the sign-in with a generic error. The error never includes the token, key material or response bodies.
 
 The upstream implementation relied on TLS to the token endpoint; this package additionally verifies the signature. Anyone migrating from the upstream code should be aware of the difference.
+
+## Two-factor authentication (TOTP)
+
+An optional second factor for sign-in: a 6-digit code from an authenticator app (Google Authenticator, Authy, 1Password and similar). It is RFC 6238 (HMAC-SHA1, 6 digits, 30 second step, 20-byte secret), implemented on `node:crypto` with no new dependency. The package ships JSON endpoints only; your app renders the screens. With `twoFactor` unset nothing changes.
+
+```ts
+const auth = createAuth({
+  // ...
+  twoFactor: {
+    issuer: 'TrueMark',      // shown in the authenticator app
+    required: false,         // true, false, or (ctx: { user, isNew }) => boolean | Promise<boolean>
+    // verifyPath: '/2fa',            // frontend page a pending user is sent to
+    // pendingTtlMs: 10 * 60_000,     // life of a session waiting for its code
+    // maxAttempts: 5,                // wrong codes before the session is deleted / the user is locked
+    // lockoutMs: 15 * 60_000,
+    // recoveryCodeCount: 10,
+  },
+});
+```
+
+`createAuth` validates these (positive finite numbers, whole numbers for the counts, non-empty `issuer`, `verifyPath` a path starting with a single `/`) and **throws if the store lacks the two-factor methods**. Apply migration `002_totp.sql` first.
+
+### How sign-in changes
+
+After the callback resolves the user and the suspended check passes, a user who has confirmed TOTP, or for whom `required` is true, gets a **pending session**: a real row, flagged pending, living only `pendingTtlMs` (never past the normal expiry or `sessionMaxAgeMs`). The callback redirects to `verifyPath` on the frontend (through `resolveRedirect`); the page the person asked for is kept on the row and returned as `redirect` when they finish. `afterSignIn` still runs in the same transaction. Everyone else signs in exactly as before.
+
+A pending session is **never** a signed-in session: `getSession`, `requireSession`, `logout-everywhere`, account linking and every non-2FA route treat it as signed out (`POST /auth/logout` still ends it). The app's `/2fa` page calls `getPendingSession(request)` to learn what to show: `{ state: 'verify' }` (ask for a code) or `{ state: 'enroll' }` (the user must set up an authenticator first).
+
+The store is asked to keep the flag, so a store that ignores it must fail closed: after committing a pending session the callback reads it back and, unless the store reports it pending, deletes it and answers `sign_in_failed` without setting a cookie; and with `twoFactor` configured a row whose `mfaPending` is not a boolean is treated as signed out.
+
+### Routes
+
+All return JSON with `Cache-Control: no-store`. Every POST needs the same-origin check (`Origin`, or `Referer`, from `frontendUrl` or `publicUrl`) and a JSON body of at most 4096 characters; a malformed body is `400 invalid_request` and is not counted as a wrong code.
+
+| Route | Needs | Does |
+| --- | --- | --- |
+| `POST /auth/2fa/verify` `{ code }` or `{ recoveryCode }` | pending session, `verify` state | On success the session becomes full: pending cleared, `mfaVerifiedAt` set, expiry extended to the normal life (still capped from `created_at`), suspension checked again, cookie reissued. Returns `{ ok: true, redirect }`. |
+| `POST /auth/2fa/setup` | full session, or pending `enroll` | Creates or replaces an **unconfirmed** secret; returns `{ secret, otpauthUri }` (the only response that ever carries the secret). For a user who is already enrolled it also needs a current `code` or `recoveryCode` in the body, otherwise `409`: a stolen full session alone cannot replace the secret. The live secret stays active until the new one is confirmed. |
+| `POST /auth/2fa/setup/confirm` `{ code }` | same | Confirms the first code, stores `confirmed_at`, returns `{ recoveryCodes }` once (plus `redirect` when the session was pending), verifies the session and **deletes the user's other sessions**. |
+| `POST /auth/2fa/recovery-codes` `{ code }` | full session | After a valid TOTP code, replaces the recovery codes (the old ones stop working) and returns the new ones. |
+| `POST /auth/2fa/disable` `{ code }` | full session | After a valid TOTP code, removes TOTP and the recovery codes and deletes the user's other sessions. `403 mfa_required` when `required` resolves true for that user. |
+| `GET /auth/2fa/status` | full session | `{ enrolled, required, verified }`. |
+
+Errors use the usual `{ "error": { "code", "message" } }` shape: `401 unauthenticated` (no session, or a pending session on a route that needs a full one), `403 account_suspended`, `403 forbidden` (origin), `400 invalid_request`, `409 mfa_not_pending` (the session is not in the state the route needs), `401 mfa_invalid_code`, `429 mfa_locked`, `403 mfa_required`.
+
+### Abuse limits
+
+A wrong code (including a wrong recovery code) counts against the pending session and against the user. At `maxAttempts` wrong codes the pending session is deleted and its cookie cleared. At `maxAttempts` for the user, the user is locked for `lockoutMs`: verify, setup, confirm, recovery-codes and disable answer `429 mfa_locked` **even for a correct code**, and the lock survives a fresh sign-in (restarting OAuth does not reset it). A success resets the count. A TOTP code is accepted for the current step and one either side, and only if its step is later than the last one used (replay protection, updated atomically). Recovery codes are single use, also atomically.
+
+The limits hold when requests arrive in parallel. Every check of a code runs in one transaction that first locks the user's row, so guesses for one user are looked at one at a time: the lock test, the guess and the failure count are a single step. Of any number of simultaneous wrong guesses, at most `maxAttempts` are ever evaluated per lock period (the rest answer `429` without being looked at), and a pending session is never evaluated more than `maxAttempts` times. A correct code that arrives after the lock is engaged is refused. A custom store must provide `lockUser` and `lockTotp` for this; see [The `AuthStore` contract](#the-authstore-contract).
+
+Things to know:
+
+- **No rate limiting of its own.** The package counts wrong codes per user and per pending session, nothing more. Rate limit `/auth/2fa/*` (and the rest of `/auth/*`) in your app or proxy; see [Security notes](#security-notes).
+- **Someone holding a pending session can lock the real user out.** A pending session is what a person has after signing in with the user's Google or GitHub account but before the second factor. Anyone in that position (for example someone who has taken over the user's Google or GitHub login, or holds a copied pending cookie) can send `maxAttempts` wrong codes and lock the user for `lockoutMs`, during which the real user cannot pass 2FA either. Keep `lockoutMs` modest, and alert on `mfa_locked` through `onError`.
+- **The session id is not rotated at verify.** The pending session becomes the full one with the same cookie value (its expiry is extended and the cookie reissued). If you need a new id after the second factor, sign the person out and in again yourself.
+- **Enrolling asks for no re-authentication.** A user with no authenticator yet can start `setup` and `setup/confirm` from any full session, so a stolen full session on an account that has not enrolled can enrol its own authenticator (this also deletes the owner's other sessions). Use `required: true`, or make people enrol before the account holds anything worth stealing.
+
+### Recovery codes and secrets
+
+`recoveryCodeCount` (default 10) recovery codes of 10 base32 characters are shown once, at confirm and at regeneration, and stored only as an HMAC-SHA256 under a key derived from `encryptionKey` (HKDF, with its own label), so a copy of the database alone cannot be used to guess codes offline. They are accepted case-insensitively, with or without spaces or dashes. The TOTP secret is stored encrypted with `encryptionKey` (AES-256-GCM, the user id as additional authenticated data). Secrets, codes and recovery codes never appear in logs, `onError` events or any response other than setup, confirm and regeneration. `onError` events keep their fixed shape (`stage: '2fa'`, a `code` such as `mfa_invalid_code`, `mfa_locked`, `mfa_not_pending`, `mfa_required`, and the error class name only).
+
+### `required`
+
+- `required: true` makes everyone use 2FA. It is also enforced on **existing** sessions: any session whose `mfaVerifiedAt` is null is held pending on its next request (`enroll` if the user has no confirmed secret, otherwise `verify`) with a fresh pending life from that moment, never longer than it already had. Sessions created while `twoFactor` was off have a null `mfaVerifiedAt`, so turning `required: true` on pushes everyone through 2FA on their next request.
+- `required` as a **function** is evaluated at sign-in only (with `{ user, isNew }`), for users who have not enrolled, and again for `GET /auth/2fa/status` and `POST /auth/2fa/disable`. It is **not** called per request, so **existing sessions stay valid until they expire** when you start requiring 2FA for someone through the function. If you need immediate enforcement for existing sessions, use `required: true`, or delete the affected users' sessions yourself (`store.deleteSessionsForUser`). If the function throws at sign-in the sign-in fails closed (`sign_in_failed`).
+- `mfaVerifiedAt` on the session result is there for later use (for example an `amr` claim); the package does nothing else with it.
+- **Turning `twoFactor` off lowers security, and the effect outlasts it.** With `twoFactor` unset, a user who enrolled signs in with the first factor alone, and that session is full with `mfaVerifiedAt` null. Turning `twoFactor` back on does not revisit it: with `required` unset or a function, such a session stays full until it expires. If your app relies on 2FA, check `mfaVerifiedAt` on the session where it matters, or use `required: true`, which holds every session with a null `mfaVerifiedAt` pending on its next request.
 
 ## Hooks
 
@@ -243,12 +315,13 @@ Each app implements `AuthStore<Tx>` over its own database (or uses the Postgres 
 | `createUserWithIdentity(profile, tx?)` | Creates both. Must throw **`DuplicateIdentityError`** when `(provider, subject)` already exists. |
 | `linkIdentity(userId, identity, tx?)` | Adds an identity to a user; also throws `DuplicateIdentityError` on a duplicate. |
 | `emailBelongsToSuspendedUser(email, tx?, opts?)` | Verified identity emails only; the argument is trimmed and lowercased before comparing. `opts.exceptUserId` excludes that user's own rows, so the check does not lock them (the sign-in passes the returning user's id). It does not exempt a suspended user from being refused: their own sign-in is still refused because `createSessionUnlessSuspended` returns false. **With a `tx` it must hold `FOR SHARE` (or an equivalent lock) on the matching user rows**, so a suspension cannot commit between the check and the end of the transaction. |
-| `createSessionUnlessSuspended(userId, idHash, expiresAt, identity, tx)` | Holds the user row `FOR SHARE`; inserts the session and returns `true`, or returns `false` when the user is suspended. |
-| `getSessionWithExpiry(idHash, now)` | The session's user and expiry, excluding suspended users. Also `verifiedEmail`: the email of the identity the session was created with when that identity is verified and still belongs to the session's user, else `null`. |
+| `createSessionUnlessSuspended(userId, idHash, expiresAt, identity, tx, opts?)` | Holds the user row `FOR SHARE`; inserts the session and returns `true`, or returns `false` when the user is suspended. With `opts.pending` (only used with `twoFactor`) the row must be stored as a pending session (`mfa_pending`, `mfa_redirect = opts.pending.redirect`). |
+| `getSessionWithExpiry(idHash, now)` | The session's user and expiry, excluding suspended users. Also `verifiedEmail`: the email of the identity the session was created with when that identity is verified and still belongs to the session's user, else `null`. With `twoFactor` it must also return `mfaPending` (a boolean), `mfaVerifiedAt`, `mfaAttempts` and `mfaRedirect`. |
 | `touchSession(idHash, expiresAt)`, `deleteSession(idHash, tx?)`, `deleteSessionsForUser(userId, tx?)` | As named; `deleteSessionsForUser` returns the number deleted. With a `tx`, `deleteSession` commits or rolls back with it (the sign-in transaction uses this to drop the previous session). A custom store's `deleteSession` must accept the optional `tx` and run in it: otherwise the old-session delete runs outside the sign-in transaction, and a suspended rollback would still delete the old session. |
 | `purgeExpiredSessions(now, opts?)` | **Required.** Deletes every session with `expires_at <= now` and returns how many were removed. With `opts.maxAgeMs` it also deletes sessions with `created_at + maxAgeMs <= now`. Custom `AuthStore` implementers must add it. |
 | `updateIdentity?(provider, subject, update, tx?)` | Optional. Updates the stored `email` and `emailVerified` of an existing identity (`email` undefined leaves it unchanged, null clears it; a no-op when the identity does not exist). The handler calls it inside the sign-in transaction on a returning sign-in, so the stored identity email stays current. Without it the stored email is not refreshed. |
 | `isSuspendedCredential?(idHash, now)` | Optional, read-only. Lets `requireSession` answer `account_suspended` instead of `unauthenticated`. |
+| Two-factor methods | `lockUser`, `lockTotp`, `getTotp`, `setPendingTotpSecret`, `confirmTotp`, `deleteTotp`, `consumeTotpStep`, `recordTotpFailure`, `resetTotpFailures`, `consumeRecoveryCode`, `replaceRecoveryCodes`, `markSessionVerified`, `markSessionPending`, `incrementSessionMfaAttempts`, `deleteOtherSessions`. All optional on the type so existing stores keep compiling, but **`createAuth` throws at startup when `twoFactor` is configured and any is missing**. `consumeTotpStep` and `consumeRecoveryCode` must be single atomic conditional writes (of two concurrent requests with the same code exactly one gets `true`); `recordTotpFailure` and `incrementSessionMfaAttempts` must be atomic increments. `lockUser(userId, mode, tx)` takes the users row `FOR SHARE` (`'share'`) or `FOR UPDATE` (`'update'`) and `lockTotp(userId, tx)` reads the `user_totp` row `FOR UPDATE`; locks are always taken in the order users row, `user_totp` row, then `recovery_codes` and `sessions` rows, and sign-in takes `lockUser(..., 'share')` before it reads `getTotp`. A store that runs one transaction at a time can make both trivial. See the signatures in `src/types.ts` and run `test/two-factor-store-contract.ts` against your store. |
 
 **`DuplicateIdentityError` contract.** The handler treats it as "the transaction is dead": it abandons the whole transaction and re-runs it once (so no savepoint is needed), finding the now-existing identity and continuing as a returning user. A store must therefore throw it only for a duplicate `(provider, subject)`, and a second failure ends in `sign_in_failed`. Because the transaction re-runs, `afterSignIn` may run twice (see Hooks).
 
@@ -273,13 +346,15 @@ storeContract('my store', async () => {
 
 `setCreatedAt` and `moveIdentity` are test-only helpers the contract suite uses (the store stamps `created_at` itself on insert, and no store method reassigns an identity); they are not part of `AuthStore`. `close` is optional.
 
+There is a second suite, `test/two-factor-store-contract.ts` (`twoFactorStoreContract(name, make)`, same harness), for stores used with `twoFactor`. It checks the atomicity of the step and recovery-code consumption, lockout counting, and that a pending session is returned as pending.
+
 `test/memory-store.test.ts` (in-memory store) and `test/pg/pg-store.test.ts` (Postgres) are the two examples.
 
 ## Postgres reference store and migrations
 
 `@ventrical/auth/pg` exports `pgAuthStore(pool)` (a `pg.Pool`) and `migrationsDir`, the absolute path of the shipped SQL migrations. Transactions are plain `BEGIN` / `COMMIT` / `ROLLBACK`; if `ROLLBACK` itself fails the original error is still thrown and the client is destroyed rather than returned to the pool.
 
-The migrations are plain SQL files (currently `001_auth.sql`: `users`, `identities`, `sessions`, with `users.suspended_at`). Apply them in file-name order, **each file once**: `001_auth.sql` has no `if not exists`, so running it again fails with "relation already exists". Track what has been applied with your own migration runner, or with a small table as below:
+The migrations are plain SQL files: `001_auth.sql` (`users`, `identities`, `sessions`, with `users.suspended_at`) and `002_totp.sql` (`user_totp`, `recovery_codes`, and four `mfa_*` columns on `sessions`). `002_totp.sql` is safe to apply whether or not you use `twoFactor`, and only needs to be applied before you turn `twoFactor` on: `pgAuthStore` still works on a database that has only `001` while `twoFactor` is unset (it reads the `mfa_*` columns when they exist and ignores them otherwise). **Upgrading an existing database:** apply `002_totp.sql` once; existing sessions stay valid and are not pending. Apply them in file-name order, **each file once**: `001_auth.sql` has no `if not exists`, so running it again fails with "relation already exists". Track what has been applied with your own migration runner, or with a small table as below:
 
 ```ts
 import { readdirSync, readFileSync } from 'node:fs';
@@ -315,7 +390,7 @@ Keep your own data in your own tables keyed by user id, not as extra columns on 
 
 ## Security notes
 
-- **Rate limiting:** the package does no rate limiting at all. `/auth/*` must be rate limited by your application (a reverse proxy or middleware in front of the auth routes).
+- **Rate limiting:** the package does no IP or request rate limiting. `/auth/*` must be rate limited by your application (a reverse proxy or middleware in front of the auth routes). The only limits it applies itself are the per-session and per-user wrong-code limits of [Two-factor authentication](#two-factor-authentication-totp).
 - **`cookieDomain` weakens cookie isolation.** Setting it gives up the `__Host-` protection against cookie tossing (a sibling subdomain can set or overwrite the cookies) and exposes the session cookie to every subdomain of that domain. Leave it unset unless you need to share the cookie across subdomains you fully trust.
 - **Purge expired sessions on a schedule.** `store.purgeExpiredSessions(now: Date, opts?: { maxAgeMs?: number }): Promise<number>` deletes every session with `expires_at <= now` and returns how many rows were removed. Pass `{ maxAgeMs }` (the same value as `sessionMaxAgeMs`, default 90 days) to also delete sessions older than the cap by `created_at`. `pgAuthStore` supports it, and it is a required method of `AuthStore`, so custom stores must implement it. Example:
 
@@ -373,8 +448,8 @@ Use conventional commits: `feat:`, `fix:`, `perf:`, `revert:` produce a release,
 
 | Commit | Release while `0.x` |
 |---|---|
-| `fix:`, `feat:`, `perf:`, `revert:` | patch (0.0.1, 0.0.2, ...) |
-| a breaking change (`feat!:` or a `BREAKING CHANGE:` footer) | minor (0.1.0, 0.2.0, ...) |
+| `fix:`, `perf:`, `revert:` | patch (0.1.1, 0.1.2, ...) |
+| `feat:`, or a breaking change (`feat!:` or a `BREAKING CHANGE:` footer) | minor (0.1.0, 0.2.0, ...) |
 
 To reach `1.0.0`, remove the `releaseRules` from `.releaserc.json` and make the commit that declares the interface stable a breaking change.
 
@@ -391,4 +466,4 @@ Consumers install from npm: `npm install @ventrical/auth`.
 
 The package does no logging of its own; use the `onError` hook to observe failures.
 
-Firms, roles and invites (they live in the apps), Drive and OneDrive consent, admin roles, connector linking, OAuth token revocation, passwords, email magic links, MFA and SAML.
+Firms, roles and invites (they live in the apps), Drive and OneDrive consent, admin roles, connector linking, OAuth token revocation, passwords, email magic links, SAML, and second factors other than TOTP (WebAuthn and passkeys, SMS or email codes, "remember this device").

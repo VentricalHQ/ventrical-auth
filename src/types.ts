@@ -59,6 +59,12 @@ export interface AuthStore<Tx = unknown> {
     expiresAt: Date,
     identity: { provider: string; subject: string },
     tx: Tx,
+    /**
+     * Two-factor sign-in. With `pending`, the row is stored as a pending session (mfa_pending, mfa_redirect = redirect).
+     * A store that ignores it would let a usable session exist before the second factor, so createAuth requires the
+     * 2FA store methods when `twoFactor` is configured and the handler checks the stored row is pending.
+     */
+    opts?: { pending?: { expiresAt: Date; redirect?: string } },
   ): Promise<boolean>;
   /** Excludes suspended users. */
   getSessionWithExpiry(
@@ -80,6 +86,14 @@ export interface AuthStore<Tx = unknown> {
          * keep compiling: an omitted value is treated as null.
          */
         verifiedEmail?: string | null;
+        /** Required of a store used with `twoFactor`: whether the row is a pending session (second factor not yet passed). */
+        mfaPending?: boolean;
+        /** When the second factor passed for this session; null if it has not. */
+        mfaVerifiedAt?: Date | null;
+        /** Wrong codes counted against this pending session. */
+        mfaAttempts?: number;
+        /** The path saved at sign-in, kept on a pending session until verify or enrolment completes. */
+        mfaRedirect?: string | null;
       }
     | undefined
   >;
@@ -104,6 +118,109 @@ export interface AuthStore<Tx = unknown> {
    */
   purgeExpiredSessions(now: Date, opts?: { maxAgeMs?: number }): Promise<number>;
   isSuspendedCredential?(idHash: string, now: Date): Promise<boolean>;
+
+  // Two-factor methods. All optional so existing custom stores keep compiling; createAuth throws at startup when
+  // `twoFactor` is configured and any is missing. Each one marked atomic must be a single conditional write.
+
+  /**
+   * Row locks that make the second factor's attempt limits hold under parallel requests. LOCK ORDER, for every caller and
+   * every store: the users row first (lockUser), then the user's user_totp row (lockTotp), then recovery_codes and
+   * sessions rows. Locks last until the transaction ends. A store without row locks (one transaction at a time) can make
+   * both trivial.
+   *
+   * Locks the user's users row: FOR SHARE (`share`) or FOR UPDATE (`update`). Returns false when the user does not
+   * exist or is suspended. Enrolling and disabling take `update` before they delete the user's other sessions, and
+   * sign-in takes `share` before it reads getTotp, so a sign-in cannot create a full session for a user that is being
+   * enrolled.
+   */
+  lockUser?(userId: string, mode: 'share' | 'update', tx: Tx): Promise<boolean>;
+  /**
+   * Reads the user's TOTP record and locks that row (FOR UPDATE) until the transaction ends, so verifications of one
+   * user run one at a time. Call lockUser first. Undefined (and nothing locked) when no row exists.
+   */
+  lockTotp?(userId: string, tx: Tx): Promise<TotpRecord | undefined>;
+  /** The user's TOTP record, or undefined when none exists. */
+  getTotp?(userId: string, tx?: Tx): Promise<TotpRecord | undefined>;
+  /** Creates or replaces the unconfirmed secret (encrypted). Never touches a confirmed secret. */
+  setPendingTotpSecret?(userId: string, secretEnc: string, now: Date, tx?: Tx): Promise<void>;
+  /**
+   * Atomic. Promotes the pending secret to the active one only if it still equals `expectedPendingEnc`: sets
+   * confirmed_at = now, last_step = step, clears failures and the lock, and replaces the recovery codes with
+   * `recoveryCodeHashes`. Returns false (changing nothing) when the pending secret is missing or different.
+   */
+  confirmTotp?(
+    userId: string,
+    p: { expectedPendingEnc: string; step: number; now: Date; recoveryCodeHashes: string[] },
+    tx?: Tx,
+  ): Promise<boolean>;
+  /** Removes the TOTP record and every recovery code. */
+  deleteTotp?(userId: string, tx?: Tx): Promise<void>;
+  /**
+   * Atomic. Sets last_step = step only when the user is enrolled, `step` is greater than last_step, and the user is
+   * not locked at `now`. Returns whether it did: of two requests with the same valid code exactly one gets true.
+   */
+  consumeTotpStep?(userId: string, step: number, now: Date, tx?: Tx): Promise<boolean>;
+  /**
+   * Atomic. Counts one wrong code. A lock that has expired starts a new count. On reaching `maxAttempts` the user is
+   * locked until now + lockoutMs and the count restarts. Returns the lock state afterwards.
+   */
+  recordTotpFailure?(
+    userId: string,
+    p: { maxAttempts: number; lockoutMs: number; now: Date },
+    tx?: Tx,
+  ): Promise<{ locked: boolean; lockedUntil: Date | null }>;
+  /** Clears the failure count and any lock. */
+  resetTotpFailures?(userId: string, tx?: Tx): Promise<void>;
+  /**
+   * Atomic single use: true for exactly one caller per unused code, false for an unknown or used one, and false while
+   * the user is locked at `now`.
+   */
+  consumeRecoveryCode?(userId: string, codeHash: string, now: Date, tx?: Tx): Promise<boolean>;
+  /** Replaces all of the user's recovery codes: old ones, used or not, stop working. */
+  replaceRecoveryCodes?(userId: string, codeHashes: string[], tx?: Tx): Promise<void>;
+  /**
+   * Clears the pending flag, sets mfa_verified_at = now, expires_at = expiresAt and clears the saved redirect. Holds
+   * the user row FOR SHARE and returns false when the user is suspended or the session no longer exists or has expired.
+   */
+  markSessionVerified?(idHash: string, userId: string, p: { now: Date; expiresAt: Date }, tx: Tx): Promise<boolean>;
+  /** Makes a session with mfa_verified_at null and not pending into a pending one expiring at `expiresAt`. */
+  markSessionPending?(idHash: string, expiresAt: Date, tx?: Tx): Promise<void>;
+  /** Atomic increment of a pending session's wrong-code count; returns the new count, or 0 when the session is missing or not pending. */
+  incrementSessionMfaAttempts?(idHash: string, tx?: Tx): Promise<number>;
+  /** Deletes every session of the user except `keepIdHash`; returns how many were removed. */
+  deleteOtherSessions?(userId: string, keepIdHash: string, tx?: Tx): Promise<number>;
+}
+
+export interface TotpRecord {
+  /** The active secret, encrypted with the user id as AAD; null until a first confirmation. */
+  secretEnc: string | null;
+  /** An enrolment in progress, not yet confirmed. */
+  pendingSecretEnc: string | null;
+  confirmedAt: Date | null;
+  lastStep: number | null;
+  failedCount: number;
+  lockedUntil: Date | null;
+}
+
+export interface TwoFactorConfig {
+  /** Shown in the authenticator app, e.g. "TrueMark". */
+  issuer: string;
+  /**
+   * true: everyone. A function: decided per user at sign-in only (and again for status and disable), with `isNew` true
+   * when the account was just created. With a plain `true`, sessions that never passed the second factor are also
+   * held pending on their next request; with a function, existing sessions stay valid until they expire. Default false.
+   */
+  required?: boolean | ((ctx: { user: AuthUser; isNew: boolean }) => boolean | Promise<boolean>);
+  /** Frontend path a pending user is sent to after the callback. Default '/2fa'. */
+  verifyPath?: string;
+  /** Life of a pending session. Default 10 minutes. */
+  pendingTtlMs?: number;
+  /** Wrong codes before a pending session is deleted and before a user is locked. Default 5. */
+  maxAttempts?: number;
+  /** How long a locked user is refused. Default 15 minutes. */
+  lockoutMs?: number;
+  /** Default 10. */
+  recoveryCodeCount?: number;
 }
 
 export type CanCreateResult = { allow: true } | { allow: false; reason: string };
@@ -120,6 +237,8 @@ export type CanCreateResult = { allow: true } | { allow: false; reason: string }
  *   invalid_state (a missing, forged, replayed or expired state cookie) and not_found are never reported: anyone can trigger them.
  *   A canCreateAccount reason is also placed in the sign-in redirect URL (?error=), so it must be a short code and
  *   must not embed PII (no emails, names or ids).
+ * '2fa' (the /auth/2fa/* routes; codes mfa_invalid_code, mfa_locked, mfa_not_pending, mfa_required, plus the generic
+ *   unauthenticated, forbidden, account_suspended, invalid_request and internal_error). Never a secret, code or recovery code.
  * 'request' is the fallback stage for a failure that happens before the route is recognised (for example a
  *   malformed request URL).
  */
@@ -179,6 +298,8 @@ export interface AuthConfig<Tx = unknown> {
    * default 90 days.
    */
   sessionMaxAgeMs?: number;
+  /** Optional TOTP second factor. Unset: behaviour is exactly as without the feature. */
+  twoFactor?: TwoFactorConfig;
   /** Longest the handler waits for hooks.onError before responding anyway. Positive, finite; default 2000. */
   onErrorTimeoutMs?: number;
   clock?: () => Date;

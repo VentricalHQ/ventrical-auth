@@ -6,8 +6,9 @@ import {
 import { hashToken } from './crypto.js';
 import { normalizeEmail } from './email.js';
 import { AuthHttpError, DuplicateIdentityError } from './errors.js';
+import { makeTwoFactor } from './twofactor.js';
 import { PROVIDER_ORDER, createProviders, issOf, type AuthProvider } from './providers.js';
-import { SESSION_TTL_MS, makeSessions, newSessionId, type SessionResult } from './session.js';
+import { SESSION_TTL_MS, makeSessions, newSessionId, type PendingSession, type SessionResult } from './session.js';
 import type { AuthConfig, AuthErrorEvent, AuthUser, ProviderName, ProviderProfile } from './types.js';
 
 const DEFAULT_ON_ERROR_TIMEOUT_MS = 2000;
@@ -18,9 +19,16 @@ export const HOST_COOKIE_NAMES = { session: '__Host-ventrical_session', oauth: '
 export interface Auth {
   /** The configured public base URL; adapters build request URLs from it, never from the Host header. */
   readonly publicUrl: string;
+  /** True when `twoFactor` is configured. Adapters read a request body only for the /auth/2fa/* POST routes, and only then. */
+  readonly twoFactorEnabled: boolean;
   handle(request: Request): Promise<Response | undefined>;
   getSession(request: Request): Promise<SessionResult | undefined>;
   requireSession(request: Request): Promise<SessionResult>;
+  /**
+   * The state of a session held before the second factor, for the app's 2FA page: 'verify' (enter a code) or 'enroll'
+   * (set up an authenticator first). Undefined for no session, a full session, or when `twoFactor` is not configured.
+   */
+  getPendingSession(request: Request): Promise<PendingSession | undefined>;
 }
 
 function json(status: number, body: unknown, cookies: string[] = []): Response {
@@ -31,7 +39,7 @@ function json(status: number, body: unknown, cookies: string[] = []): Response {
 
 function errorResponse(err: unknown): Response {
   if (err instanceof AuthHttpError) {
-    return json(err.status, { error: { code: err.code, message: err.message } });
+    return json(err.status, { error: { code: err.code, message: err.message } }, [...err.cookies]);
   }
   // Anything else may carry secrets (provider bodies, SQL, tokens): no detail, nothing logged.
   return json(500, { error: { code: 'internal_error', message: 'Internal error' } });
@@ -47,6 +55,8 @@ function safeDecode(v: string): string {
 }
 
 const MAX_START_REDIRECT = 512;
+const DEFAULT_PENDING_TTL_MS = 10 * 60 * 1000;
+const DEFAULT_VERIFY_PATH = '/2fa';
 
 /** Thrown inside the sign-in transaction to roll everything back and redirect to ?error=suspended. */
 class SuspendedSignal extends Error {}
@@ -59,8 +69,11 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
     session: config.cookieNames?.session ?? defaults.session,
     oauth: config.cookieNames?.oauth ?? defaults.oauth,
   };
+  const tf = config.twoFactor;
+  const pendingTtlMs = tf?.pendingTtlMs ?? DEFAULT_PENDING_TTL_MS;
   const sessions = makeSessions({
     store: config.store,
+    ...(tf ? { mfa: { requiredForAll: tf.required === true, pendingTtlMs } } : {}),
     cookieNames,
     publicUrl: config.publicUrl,
     sessionTtlMs: config.sessionTtlMs ?? SESSION_TTL_MS,
@@ -156,6 +169,12 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
     return new Response(null, { status: 302, headers });
   }
 
+  /** Whether this user must use a second factor. Called only for users who have not enrolled. */
+  async function isRequired(user: AuthUser, isNew: boolean): Promise<boolean> {
+    const r = tf?.required;
+    return typeof r === 'function' ? (await r({ user, isNew })) === true : r === true;
+  }
+
   const trimSlash = (u: string): string => u.replace(/\/+$/, '');
   const redirectTo = (location: string, cookies: string[] = []): Response => {
     // new URL percent-encodes non-ASCII paths; a Location must never throw (this runs after the commit).
@@ -216,7 +235,10 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
     };
 
     // Linking needs the same session that began the flow (bound at /start) to still be current.
-    const current = await sessions.getSession(request);
+    const resolved = await sessions.resolve(request, clock());
+    const current = resolved?.kind === 'full' ? resolved.session : undefined;
+    // A pending session is never a signed-in session: it cannot link, and a new sign-in replaces it.
+    const stalePendingHash = resolved?.kind === 'pending' ? resolved.idHash : undefined;
     if (current && saved.linkUserId === current.user.id) {
       ctx.stage = 'link';
       const linkError = async (reason: string) => {
@@ -264,9 +286,16 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
     const { id, idHash } = newSessionId();
     const signedInAt = clock();
     const expiresAt = sessions.newExpiry(signedInAt);
+    // A pending session lives only pendingTtlMs, and never past the normal expiry or the absolute cap.
+    const pendingExpiresAt = new Date(Math.min(signedInAt.getTime() + pendingTtlMs, expiresAt.getTime()));
+    let madePending = false;
     const attempt = (found: Awaited<ReturnType<typeof config.store.findUserByIdentity>>) => config.store.transaction(async (tx) => {
       let user: AuthUser | undefined = found && { id: found.id, email: found.email, name: found.name };
       let isNew = false;
+      // With twoFactor, the user row is locked FOR SHARE before anything else is touched (lock order: users row first, then
+      // sessions rows, as confirm and disable take them). A confirm or disable (FOR UPDATE) is then either finished, and
+      // seen by the getTotp below, or waits for this sign-in and ends the session it creates.
+      if (tf && found) await config.store.lockUser!(found.id, 'share', tx);
       // Every sign-in, new or returning: a verified email that belongs to a suspended user (another account's row; the
       // signing-in user's own row is ignored) refuses the sign-in. Authoritative: locked, same tx as the writes below.
       if (profile.emailVerified && profile.email !== undefined
@@ -283,6 +312,7 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
       if (!user) {
         user = await config.store.createUserWithIdentity({ ...identity, ...(profile.name !== undefined ? { name: profile.name } : {}) }, tx);
         isNew = true;
+        if (tf) await config.store.lockUser!(user.id, 'share', tx);
       }
       // The request's old session (a valid one that is not the new one) goes with this sign-in: same tx, so a suspended
       // refusal below rolls the delete back and the person keeps it. Not done on the link path.
@@ -290,7 +320,22 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
         const oldHash = hashToken(current.id);
         if (oldHash !== idHash) await config.store.deleteSession(oldHash, tx);
       }
-      const ok = await config.store.createSessionUnlessSuspended(user.id, idHash, expiresAt, { provider: provider.name, subject: profile.subject }, tx);
+      if (stalePendingHash && stalePendingHash !== idHash) await config.store.deleteSession(stalePendingHash, tx);
+      const sessionIdentity = { provider: provider.name, subject: profile.subject };
+      madePending = false;
+      let ok: boolean;
+      if (tf) {
+        // Enrolled, or required for this user. A throwing `required` hook fails the sign-in closed (sign_in_failed).
+        const totp = await config.store.getTotp!(user.id, tx);
+        madePending = totp?.confirmedAt != null || (await isRequired(user, isNew));
+      }
+      if (madePending) {
+        ok = await config.store.createSessionUnlessSuspended(
+          user.id, idHash, pendingExpiresAt, sessionIdentity, tx, { pending: { expiresAt: pendingExpiresAt, redirect: saved.redirect } },
+        );
+      } else {
+        ok = await config.store.createSessionUnlessSuspended(user.id, idHash, expiresAt, sessionIdentity, tx);
+      }
       if (!ok) throw new SuspendedSignal();
       // After the session row exists, so a suspended person never reaches the hook's non-transaction side effects. If the
       // hook throws, the whole tx (user, session, old-session delete) rolls back.
@@ -311,6 +356,15 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
       return err instanceof SuspendedSignal ? await signinError('suspended') : await signinError('sign_in_failed', err);
     }
     // Only after the transaction has committed.
+    if (madePending) {
+      // Fail closed: a store that ignored the pending flag has just stored a usable session. Never hand out its cookie.
+      const stored = await config.store.getSessionWithExpiry(idHash, signedInAt).catch(() => undefined);
+      if (stored?.mfaPending !== true) {
+        await Promise.resolve(config.store.deleteSession(idHash)).catch(() => undefined);
+        return await signinError('sign_in_failed');
+      }
+      return redirectTo(resolveTarget(tf?.verifyPath ?? DEFAULT_VERIFY_PATH), [sessions.sessionCookie(id, pendingExpiresAt.getTime() - signedInAt.getTime())]);
+    }
     return redirectTo(target, [sessions.sessionCookie(id, expiresAt.getTime() - signedInAt.getTime())]);
   }
 
@@ -344,6 +398,10 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
     return new Response(null, { status: 204, headers: { 'set-cookie': sessions.clearSessionCookie() } });
   }
 
+  const twoFactor = tf
+    ? makeTwoFactor({ config, tf, clock, sessions, json, requireSameOrigin, resolveTarget, pendingTtlMs })
+    : undefined;
+
   async function handle(request: Request): Promise<Response | undefined> {
     let stage = 'request';
     let provider: ProviderName | undefined;
@@ -357,6 +415,12 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
       if (method === 'POST' && (path === '/auth/logout' || path === '/auth/logout-everywhere')) stage = 'logout';
       if (method === 'POST' && path === '/auth/logout') return await logout(request);
       if (method === 'POST' && path === '/auth/logout-everywhere') return await logoutEverywhere(request);
+      if (twoFactor && path.startsWith('/auth/2fa/')) {
+        stage = '2fa';
+        const res = await twoFactor.handle(request, method, path);
+        if (res) return res;
+        stage = 'request';
+      }
       const m = method === 'GET' ? /^\/auth\/([^/]+)\/start$/.exec(path) : null;
       if (m) {
         stage = 'start';
@@ -371,5 +435,8 @@ export function createHandler<Tx>(config: AuthConfig<Tx>): Auth {
     }
   }
 
-  return { publicUrl: config.publicUrl, handle, getSession: sessions.getSession, requireSession: sessions.requireSession };
+  return {
+    publicUrl: config.publicUrl, twoFactorEnabled: tf !== undefined, handle, getSession: sessions.getSession, requireSession: sessions.requireSession,
+    getPendingSession: sessions.getPendingSession,
+  };
 }
