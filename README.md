@@ -442,6 +442,12 @@ Releases are automatic. Merging into `main` runs CI, then [semantic-release](htt
 
 Work lands on `staging` (CI runs on every push and PR), and a PR from `staging` into `main` makes a release. **Merge it with a merge commit, not a squash**, so the individual commit messages reach the release.
 
+semantic-release reads the commit headers that land on `main`, so what you merge decides the release:
+
+- **Merge commit (preferred):** the individual `feat:` and `fix:` commits from `staging` reach `main` and become the release notes.
+- **Squash merge:** only the squash commit's title is read. A title such as `Staging (#16)` has no type, so **no release is made** (this happened once: the run succeeded and published nothing). If the repository only allows squash merging, or `main` requires linear history, set the PR title to a conventional header (for example `feat: add optional TOTP two-factor authentication`) before merging.
+- A release run that succeeds without publishing means no commit since the last tag had a releasing type. Check the commit headers on `main`, not the workflow.
+
 ### Commit messages decide the version
 
 Use conventional commits: `feat:`, `fix:`, `perf:`, `revert:` produce a release, and `docs:`, `test:`, `chore:`, `refactor:` do not. While the package is `0.x`, the release rules are capped so that it stays there:
