@@ -440,22 +440,26 @@ The code was extracted, by copying, from the Kagaya backend's sign-in code (rout
 
 Releases are automatic. Merging into `main` runs CI, then [semantic-release](https://github.com/semantic-release/semantic-release) reads the commits since the last tag, picks the next version, tags it, creates a GitHub release with notes generated from the commits, and publishes `@ventrical/auth` to npm with provenance. There is no manual tagging.
 
-Work lands on `staging` (CI runs on every push and PR), and a PR from `staging` into `main` makes a release. **Merge it with a merge commit, not a squash**, so the individual commit messages reach the release.
+Work lands on `staging` (CI runs on every push and PR), and every PR merged into `main` makes a release.
 
-semantic-release reads the commit headers that land on `main`, so what you merge decides the release:
+Every merge into `main` makes a release. semantic-release reads the commit headers that land on `main` (with a squash merge, that is the PR title), so the title decides the size of the release:
 
-- **Merge commit (preferred):** the individual `feat:` and `fix:` commits from `staging` reach `main` and become the release notes.
-- **Squash merge:** only the squash commit's title is read. A title such as `Staging (#16)` has no type, so **no release is made** (this happened once: the run succeeded and published nothing). If the repository only allows squash merging, or `main` requires linear history, set the PR title to a conventional header (for example `feat: add optional TOTP two-factor authentication`) before merging.
-- A release run that succeeds without publishing means no commit since the last tag had a releasing type. Check the commit headers on `main`, not the workflow.
+- `feat: ...` gives a **minor** release (0.1.0, 0.2.0, ...), and so does a breaking change.
+- anything else gives a **patch** release (0.1.1, 0.1.2, ...): `fix:`, `perf:`, `docs:`, `chore:`, `ci:`, even a title with no type.
+- When several commits land together, the biggest one wins.
+
+So when merging a PR into `main`, write its title as `feat: ...` for a new capability and `fix: ...` (or `docs:`, `chore:`) otherwise. Merge commits and squash merges both work.
 
 ### Commit messages decide the version
 
-Use conventional commits: `feat:`, `fix:`, `perf:`, `revert:` produce a release, and `docs:`, `test:`, `chore:`, `refactor:` do not. While the package is `0.x`, the release rules are capped so that it stays there:
+Use conventional commits. While the package is `0.x`, the release rules are capped so that it stays there:
 
-| Commit | Release while `0.x` |
+| Commit (or PR title, when squashing) | Release while `0.x` |
 |---|---|
-| `fix:`, `perf:`, `revert:` | patch (0.1.1, 0.1.2, ...) |
 | `feat:`, or a breaking change (`feat!:` or a `BREAKING CHANGE:` footer) | minor (0.1.0, 0.2.0, ...) |
+| everything else (`fix:`, `perf:`, `revert:`, `docs:`, `chore:`, `ci:`, no type) | patch (0.1.1, 0.1.2, ...) |
+
+The release notes list every type under its own heading. A merge into `main` normally publishes a new version within a few minutes; if none appears, look at the Release run in the Actions tab.
 
 To reach `1.0.0`, remove the `releaseRules` from `.releaserc.json` and make the commit that declares the interface stable a breaking change.
 
